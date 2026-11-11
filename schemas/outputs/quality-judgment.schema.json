@@ -1,0 +1,269 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CloudServe per-ticket post-run quality judgment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "ticket_id",
+    "input_index",
+    "sample_index",
+    "judge_model",
+    "rubric_version",
+    "prompt_version",
+    "sample_seed",
+    "input_identity_sha256",
+    "reference_available",
+    "status",
+    "dimension_scores",
+    "overall_quality_score",
+    "citation_judgments",
+    "unsupported_factual_claims",
+    "error"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "ticket_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "input_index": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "sample_index": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 19
+    },
+    "judge_model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "rubric_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "prompt_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sample_seed": {
+      "type": "string",
+      "minLength": 1
+    },
+    "input_identity_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "reference_available": {
+      "type": "boolean"
+    },
+    "status": {
+      "enum": [
+        "evaluated",
+        "failed"
+      ]
+    },
+    "dimension_scores": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "relevance",
+        "factual_correctness",
+        "completeness_actionability",
+        "clarity"
+      ],
+      "properties": {
+        "relevance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "score",
+            "rationale"
+          ],
+          "properties": {
+            "score": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5
+            },
+            "rationale": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "factual_correctness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "score",
+            "rationale"
+          ],
+          "properties": {
+            "score": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5
+            },
+            "rationale": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "completeness_actionability": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "score",
+            "rationale"
+          ],
+          "properties": {
+            "score": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5
+            },
+            "rationale": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "clarity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "score",
+            "rationale"
+          ],
+          "properties": {
+            "score": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5
+            },
+            "rationale": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "overall_quality_score": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 1,
+      "maximum": 5
+    },
+    "citation_judgments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "claim_index",
+          "citation_index",
+          "passage_id",
+          "source_ref",
+          "citation_id",
+          "supported",
+          "rationale"
+        ],
+        "properties": {
+          "claim_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "citation_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "passage_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_ref": {
+            "type": "string",
+            "minLength": 1
+          },
+          "citation_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "supported": {
+            "type": "boolean"
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "unsupported_factual_claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "claim",
+          "reviewed_passage_ids",
+          "rationale"
+        ],
+        "properties": {
+          "claim": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reviewed_passage_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "error": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

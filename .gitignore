@@ -1,0 +1,26 @@
+# Python environments, caches, and build output
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+*.egg-info/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Local runtime records and generated run exports
+data/runtime/*
+!data/runtime/.gitkeep
+outputs/*
+!outputs/.gitkeep
+
+# OS/editor noise
+.DS_Store
+.workarea/
+.agents/

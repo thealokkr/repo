@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CloudServe per-ticket exception",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "input_index",
+    "ticket_id",
+    "occurred_at",
+    "error_code",
+    "message"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "input_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "ticket_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "error_code": {
+      "type": "string",
+      "minLength": 1
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

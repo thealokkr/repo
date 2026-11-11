@@ -1,0 +1,25 @@
+[project]
+name = "cloudserve-support"
+version = "0.1.0"
+requires-python = ">=3.13,<3.15"
+dependencies = [
+    "chromadb>=1.5.9,<2",
+    "jsonschema>=4.26.0",
+    "openai>=2,<3",
+    "python-dotenv>=1.2.4",
+]
+
+[build-system]
+requires = ["setuptools>=40.8.0"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+cloudserve = "cloudserve_support.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
