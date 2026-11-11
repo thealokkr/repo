@@ -611,28 +611,13 @@ CLASSIFICATION_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "required": [
-        "intent", "urgency", "confidence", "alternatives", "uncertainties", "reason",
-        "provider", "model_name", "provider_status",
+        "intent", "urgency", "confidence", "provider", "model_name", "provider_status",
     ],
     "properties": {
         "intent": INTENT_SCHEMA,
         "urgency": {"enum": ["high", "medium", "low", "unknown"]},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-        "alternatives": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["intent", "confidence"],
-                "properties": {
-                    "intent": INTENT_SCHEMA,
-                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                },
-            },
-        },
-        "uncertainties": {"type": "array", "items": {"type": "string"}},
-        "reason": {"type": "string", "minLength": 1},
-        "provider": {"enum": ["offline", "openai", "not_attempted"]},
+        "provider": {"enum": ["openai", "not_attempted"]},
         "model_name": {"type": "string", "minLength": 1},
         "provider_status": {"enum": ["classified", "fallback"]},
     },

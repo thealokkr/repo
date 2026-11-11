@@ -11,8 +11,7 @@ from cloudserve_support.errors import ConfigurationError
 class Settings:
     """Minimal settings shared by future CLI commands."""
 
-    provider: str = "OFFLINE"
-    draft_generation_provider: str | None = None
+    draft_generation_provider: str = "OPENAI"
     openai_api_key: str | None = field(default=None, repr=False)
     embedding_model: str = "text-embedding-3-small"
     llm_model: str = "gpt-6-luna"
@@ -22,15 +21,8 @@ class Settings:
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Settings":
         """Load and validate settings without requiring provider credentials."""
         values = os.environ if environ is None else environ
-        provider = values.get("LLM_PROVIDER", "OFFLINE").strip().upper()
-        if provider not in {"OFFLINE", "OPENAI"}:
-            raise ConfigurationError(
-                "unsupported_provider",
-                "LLM_PROVIDER must be OFFLINE or OPENAI; update the setting in your environment or .env file.",
-            )
-
         draft_generation_provider = (
-            values.get("DRAFT_GENERATION_PROVIDER", "").strip().upper() or provider
+            values.get("DRAFT_GENERATION_PROVIDER", "OPENAI").strip().upper()
         )
         if draft_generation_provider not in {"OFFLINE", "OPENAI"}:
             raise ConfigurationError(
@@ -62,7 +54,6 @@ class Settings:
             )
 
         return cls(
-            provider=provider,
             draft_generation_provider=draft_generation_provider,
             openai_api_key=values.get("OPENAI_API_KEY", "").strip() or None,
             embedding_model=embedding_model,
@@ -85,14 +76,13 @@ class Settings:
                 "OPENAI_QUALITY_JUDGE_MODEL must not be empty. Set a model name in your environment or .env file.",
             )
         return cls(
-            provider="OFFLINE",
             openai_api_key=values.get("OPENAI_API_KEY", "").strip() or None,
             quality_judge_model=quality_judge_model,
         )
 
     def require_openai_api_key(self) -> str:
         """Return the key for provider-backed work or raise a safe error."""
-        if self.provider == "OPENAI" and self.openai_api_key:
+        if self.openai_api_key:
             return self.openai_api_key
         raise ConfigurationError(
             "missing_openai_api_key",
@@ -100,8 +90,8 @@ class Settings:
         )
 
     def require_draft_generation_api_key(self) -> str:
-        """Return the key only when OpenAI drafting was explicitly configured."""
-        if (self.draft_generation_provider or self.provider) == "OPENAI" and self.openai_api_key:
+        """Return the key when OpenAI drafting is selected."""
+        if self.draft_generation_provider == "OPENAI" and self.openai_api_key:
             return self.openai_api_key
         raise ConfigurationError(
             "missing_openai_api_key",

@@ -35,6 +35,10 @@ from cloudserve_support.knowledge.retrieval import (
 from cloudserve_support.processing.run_tickets import run_ticket_batch
 from cloudserve_support.reporting.output_schemas import initialize_output_schemas
 
+TEST_ROUTING_POLICY_PATH = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "decisions-routing-policy.json"
+)
+
 
 class _FakeEmbeddings:
     """Return one fixed-dimension query vector without calling a provider."""
@@ -166,7 +170,6 @@ def _retriever(
         encoding="utf-8",
     )
     settings = Settings(
-        provider="OFFLINE",
         openai_api_key="test-key",
         embedding_model="text-embedding-3-small",
         llm_model="gpt-6-luna",
@@ -280,7 +283,7 @@ def test_missing_or_malformed_governance_metadata_is_rejected(
 
     def assert_runtime_has_no_eligible_source(metadata_path: Path, index: int) -> None:
         retriever = KnowledgeRetriever(
-            Settings(provider="OFFLINE", embedding_model="text-embedding-3-small"),
+            Settings(embedding_model="text-embedding-3-small"),
             metadata_path=metadata_path,
             index_path=tmp_path / f"missing-index-{index}",
             collection=_FakeCollection([], {}),
@@ -443,7 +446,7 @@ def test_stale_review_and_unavailable_index_return_no_sources(tmp_path: Path) ->
     assert stale.excluded_candidate_counts["review_expired"] == 108
 
     unavailable = KnowledgeRetriever(
-        Settings(provider="OFFLINE", embedding_model="text-embedding-3-small"),
+        Settings(embedding_model="text-embedding-3-small"),
         index_path=tmp_path / "missing-index",
     ).retrieve(_ticket())
     assert unavailable.status == "unavailable"
@@ -591,7 +594,6 @@ def test_batch_degrades_after_query_embedding_timeout_and_processes_later_ticket
         "cloudserve_support.reporting.output_schemas.OUTPUT_SCHEMA_DIRECTORY",
         schema_directory,
     )
-    monkeypatch.setenv("LLM_PROVIDER", "OFFLINE")
     monkeypatch.setenv("OPENAI_API_KEY", "")
     input_path = tmp_path / "two-tickets.json"
     input_path.write_text(
@@ -619,6 +621,7 @@ def test_batch_degrades_after_query_embedding_timeout_and_processes_later_ticket
         output_root=tmp_path / "outputs",
         database_path=tmp_path / "runtime.sqlite3",
         retriever=retriever,
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     results = [

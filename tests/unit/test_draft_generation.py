@@ -118,7 +118,6 @@ def test_openai_generation_uses_configured_model_and_strict_json_schema(monkeypa
 
     monkeypatch.setattr(openai, "OpenAI", FakeOpenAIClient)
     settings = Settings(
-        provider="OFFLINE",
         draft_generation_provider="OPENAI",
         openai_api_key="test-key",
         embedding_model="test-embeddings",
@@ -134,7 +133,6 @@ def test_openai_generation_uses_configured_model_and_strict_json_schema(monkeypa
     content = provider.generate_claims(_ticket(), sources=(source,), model_name=settings.llm_model)
 
     assert provider.name == "openai"
-    assert settings.provider == "OFFLINE"
     assert json.loads(content)["claims"][0]["source_ids"] == ["DOC-1:hash:0"]
     assert calls["completion"]["model"] == "support-draft-model"
     assert calls["completion"]["reasoning_effort"] == "none"
@@ -267,28 +265,23 @@ def test_claim_citations_must_each_support_the_claim() -> None:
     assert grounded is False
 
 
-def test_draft_provider_can_use_openai_without_switching_classifier_provider() -> None:
+def test_draft_provider_defaults_to_openai() -> None:
     settings = Settings.from_env(
         {
-            "LLM_PROVIDER": "OFFLINE",
-            "DRAFT_GENERATION_PROVIDER": "OPENAI",
             "OPENAI_API_KEY": "test-key",
         }
     )
 
-    assert settings.provider == "OFFLINE"
     assert settings.draft_generation_provider == "OPENAI"
     assert create_draft_generation_provider(settings).name == "openai"
     assert settings.require_draft_generation_api_key() == "test-key"
-    with pytest.raises(ConfigurationError):
-        settings.require_openai_api_key()
+    assert settings.require_openai_api_key() == "test-key"
 
 
 def test_draft_generation_provider_setting_rejects_unsupported_value() -> None:
     with pytest.raises(ConfigurationError):
         Settings.from_env(
             {
-                "LLM_PROVIDER": "OFFLINE",
                 "DRAFT_GENERATION_PROVIDER": "NOT_A_PROVIDER",
             }
         )
@@ -349,7 +342,6 @@ def test_composition_omits_question_when_requested_detail_is_already_present() -
 
 def _settings() -> Settings:
     return Settings(
-        provider="OFFLINE",
         draft_generation_provider="OPENAI",
         openai_api_key="test-key",
         embedding_model="test-embeddings",

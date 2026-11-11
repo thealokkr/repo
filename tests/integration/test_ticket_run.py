@@ -6,15 +6,16 @@ import json
 import sqlite3
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
+import openai
 import pytest
 
 from cloudserve_support import cli
 from cloudserve_support.classification.ticket_classification import (
-    OFFLINE_CLASSIFIER_MODEL,
-    TicketClassification,
-    classification_failure,
-    classify_offline_ticket,
+    DECISIONS_CLASSIFIER_MODEL,
+    INTENT_VALUES,
+    URGENCY_VALUES,
 )
 from cloudserve_support.persistence.runtime_database import initialize_runtime_database
 from cloudserve_support.processing import run_tickets as run_tickets_module
@@ -25,10 +26,67 @@ from cloudserve_support.reporting.output_schemas import OUTPUT_SCHEMA_DEFINITION
 from cloudserve_support.reporting.output_schemas import initialize_output_schemas
 from cloudserve_support.reporting.output_schemas import validate_output_record
 
+TEST_ROUTING_POLICY_PATH = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "decisions-routing-policy.json"
+)
+
 
 def _read_jsonl(path: Path) -> list[dict[str, object]]:
     """Read every JSON object written to one JSON Lines export."""
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _decision_choice(name: str, selected: str, values: frozenset[str]) -> SimpleNamespace:
+    """Build one typed choice answer with an explicit probability for every value."""
+    alternate = next(value for value in sorted(values) if value != selected)
+    probabilities = [
+        SimpleNamespace(
+            value=value,
+            probability=0.07 if value == alternate else 0.93 if value == selected else 0.0,
+        )
+        for value in sorted(values)
+    ]
+    return SimpleNamespace(
+        type="choice",
+        name=name,
+        choice=selected,
+        confidence=0.93,
+        probabilities=probabilities,
+    )
+
+
+def _install_decisions_api_mock(monkeypatch, choose_labels) -> None:
+    """Replace only the Decisions SDK request with a canned typed response."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("DRAFT_GENERATION_PROVIDER", "OFFLINE")
+
+    class FakeOpenAI:
+        def __init__(self, **options: object) -> None:
+            self.decisions = SimpleNamespace(create=self.create_decision)
+
+        @staticmethod
+        def create_decision(**request: object) -> SimpleNamespace:
+            batch_input = json.loads(request["input"])
+            ticket_fields = batch_input["tickets"]
+            answers = []
+            for ticket_index, ticket in enumerate(ticket_fields):
+                intent, urgency = choose_labels(ticket)
+                answers.extend(
+                    [
+                        _decision_choice(
+                            f"ticket_{ticket_index}_intent", intent, INTENT_VALUES
+                        ),
+                        _decision_choice(
+                            f"ticket_{ticket_index}_urgency", urgency, URGENCY_VALUES
+                        ),
+                    ]
+                )
+            return SimpleNamespace(
+                model=DECISIONS_CLASSIFIER_MODEL,
+                answers=answers,
+            )
+
+    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
 
 
 class _ReadyRetriever:
@@ -75,6 +133,10 @@ def test_one_ticket_run_persists_label_audit_and_schema_valid_exports(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _install_decisions_api_mock(
+        monkeypatch,
+        lambda ticket_fields: ("deployment_failure", "medium"),
+    )
     schema_directory = tmp_path / "schemas" / "outputs"
     initialize_output_schemas(schema_directory)
     monkeypatch.setattr(
@@ -101,6 +163,7 @@ def test_one_ticket_run_persists_label_audit_and_schema_valid_exports(
         database_path=tmp_path / "runtime.sqlite3",
         label="cs001-tracer",
         retriever=_ReadyRetriever(),
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     assert output_directory.name == run_id
@@ -179,9 +242,9 @@ def test_one_ticket_run_persists_label_audit_and_schema_valid_exports(
             (run_id,),
         ).fetchone()
         assert audit_provenance is not None
-        assert audit_provenance[0] == "offline-rule-based-v5"
+        assert audit_provenance[0] == "gpt-6-luna"
         assert json.loads(audit_provenance[1])["intent"] == "deployment_failure"
-        assert json.loads(audit_provenance[2]) == results[0]["classification"]["alternatives"]
+        assert json.loads(audit_provenance[2]) == []
         assert audit_provenance[3] == results[0]["routing"]["confidence_threshold"]
         assert json.loads(audit_provenance[4]) == [
             "A3", "A4", "A5", "A6", "A7", "A11", "FR-01", "FR-02",
@@ -233,6 +296,7 @@ def test_ticket_duration_includes_audit_commit_and_is_persisted_with_result(
         output_root=tmp_path / "outputs",
         database_path=tmp_path / "runtime.sqlite3",
         retriever=_ReadyRetriever(),
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     result = _read_jsonl(output_directory / "results.jsonl")[0]
@@ -279,12 +343,14 @@ def test_each_run_exports_to_its_own_output_directory(
         output_root=output_root,
         database_path=database_path,
         retriever=_ReadyRetriever(),
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
     second_run_id, second_directory, _ = run_ticket_batch(
         input_path=second_input,
         output_root=output_root,
         database_path=database_path,
         retriever=_ReadyRetriever(),
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     assert first_run_id != second_run_id
@@ -311,6 +377,7 @@ def test_malformed_ticket_still_gets_one_degraded_result_and_exception(
         input_path=input_path,
         output_root=tmp_path / "outputs",
         database_path=tmp_path / "runtime.sqlite3",
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     results = _read_jsonl(output_directory / "results.jsonl")
@@ -386,6 +453,7 @@ def test_four_channel_batch_keeps_later_tickets_after_malformed_record(
         input_path=input_path,
         output_root=tmp_path / "outputs",
         database_path=tmp_path / "runtime.sqlite3",
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     results = _read_jsonl(output_directory / "results.jsonl")
@@ -438,6 +506,7 @@ def test_empty_batch_writes_all_exports_with_explicit_zero_counts(
         input_path=input_path,
         output_root=tmp_path / "outputs",
         database_path=tmp_path / "runtime.sqlite3",
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     assert {path.name for path in output_directory.iterdir()} == {
@@ -475,6 +544,7 @@ def test_export_reconciliation_rejects_a_persisted_ticket_without_a_result(
             output_root=tmp_path / "outputs",
             database_path=tmp_path / "runtime.sqlite3",
             retriever=_ReadyRetriever(),
+            policy_path=TEST_ROUTING_POLICY_PATH,
         )
 
     connection = sqlite3.connect(tmp_path / "runtime.sqlite3")
@@ -500,7 +570,6 @@ def test_export_write_failure_returns_cli_exit_status_one(
         "cloudserve_support.reporting.output_schemas.OUTPUT_SCHEMA_DIRECTORY",
         schema_directory,
     )
-    monkeypatch.setenv("LLM_PROVIDER", "OFFLINE")
     input_path = tmp_path / "one-ticket.json"
     input_path.write_text(json.dumps([_supported_integration_ticket("T-EXPORT-FAILURE")]), encoding="utf-8")
 
@@ -521,6 +590,8 @@ def test_export_write_failure_returns_cli_exit_status_one(
             str(tmp_path / "outputs"),
             "--database",
             str(tmp_path / "runtime.sqlite3"),
+            "--policy",
+            str(TEST_ROUTING_POLICY_PATH),
         ]
     )
 
@@ -535,10 +606,16 @@ def test_export_write_failure_returns_cli_exit_status_one(
         connection.close()
 
 
-def test_classifier_provider_failure_degrades_one_ticket_and_continues(
+def test_classifier_batch_provider_failure_degrades_the_whole_batch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    def choose_labels(ticket_fields: dict[str, object]) -> tuple[str, str]:
+        if ticket_fields["subject"] == "API pagination":
+            raise RuntimeError("simulated Decisions API timeout")
+        return "unclear_request", "unknown"
+
+    _install_decisions_api_mock(monkeypatch, choose_labels)
     schema_directory = tmp_path / "schemas" / "outputs"
     initialize_output_schemas(schema_directory)
     monkeypatch.setattr(
@@ -562,35 +639,25 @@ def test_classifier_provider_failure_degrades_one_ticket_and_continues(
     input_path = tmp_path / "provider-failure.json"
     input_path.write_text(json.dumps(records), encoding="utf-8")
 
-    def classify_with_one_provider_failure(ticket, settings):
-        if ticket.ticket_id == "T-PROVIDER-FAILURE":
-            return classification_failure(
-                provider="openai",
-                model_name="gpt-6-luna",
-                uncertainty="model timeout",
-            )
-        return classify_offline_ticket(ticket)
-
-    monkeypatch.setattr(
-        "cloudserve_support.processing.run_tickets.classify_ticket",
-        classify_with_one_provider_failure,
-    )
     run_id, output_directory, metrics = run_ticket_batch(
         input_path=input_path,
         output_root=tmp_path / "outputs",
         database_path=tmp_path / "runtime.sqlite3",
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     results = _read_jsonl(output_directory / "results.jsonl")
     exceptions = _read_jsonl(output_directory / "exceptions.jsonl")
-    assert [result["status"] for result in results] == ["failed", "completed"]
-    assert [result["route"] for result in results] == ["degrade", "escalate"]
-    assert results[1]["routing"]["retrieval"]["status"] == "unavailable"
-    assert results[0]["classification"]["intent"] == "unclear_request"
-    assert results[0]["routing"]["policy_frozen"] is True
-    assert exceptions[0]["error_code"] == "classification_unavailable"
+    assert [result["status"] for result in results] == ["failed", "failed"]
+    assert [result["route"] for result in results] == ["degrade", "degrade"]
+    assert all(result["classification"]["intent"] == "unclear_request" for result in results)
+    assert all(result["routing"]["policy_frozen"] is True for result in results)
+    assert [item["error_code"] for item in exceptions] == [
+        "classification_unavailable",
+        "classification_unavailable",
+    ]
     assert metrics["total_count"] == 2
-    assert metrics["failed_count"] == metrics["exception_count"] == 1
+    assert metrics["failed_count"] == metrics["exception_count"] == 2
 
     connection = sqlite3.connect(tmp_path / "runtime.sqlite3")
     try:
@@ -673,6 +740,7 @@ def test_generation_failures_degrade_each_ticket_and_continue(
         database_path=tmp_path / "runtime.sqlite3",
         retriever=_ReadyRetriever(),
         generator=_FailingDraftGenerator(bad_json_ticket="T-BAD-GENERATION-JSON"),
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     results = _read_jsonl(output_directory / "results.jsonl")
@@ -793,6 +861,7 @@ def test_freeform_unsafe_or_non_missing_clarification_is_rejected(
         database_path=tmp_path / "runtime.sqlite3",
         retriever=_ReadyRetriever(),
         generator=_ClarificationKindGenerator(unsafe_question),
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     result = _read_jsonl(output_directory / "results.jsonl")[0]
@@ -829,6 +898,7 @@ def test_clarification_for_detail_already_in_ticket_is_omitted(
         database_path=tmp_path / "runtime.sqlite3",
         retriever=_ReadyRetriever(),
         generator=_ClarificationKindGenerator("error_details"),
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     result = _read_jsonl(output_directory / "results.jsonl")[0]
@@ -859,6 +929,7 @@ def test_unresolved_claim_citation_is_blocked_and_escalated(
         database_path=tmp_path / "runtime.sqlite3",
         retriever=_ReadyRetriever(),
         generator=_UnresolvedCitationGenerator(),
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     result = _read_jsonl(output_directory / "results.jsonl")[0]
@@ -933,6 +1004,7 @@ def test_no_evidence_creates_no_draft_and_skips_generator(
         database_path=tmp_path / "runtime.sqlite3",
         retriever=_NoEvidenceRetriever(),
         generator=_UnexpectedDraftGenerator(),
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     result = _read_jsonl(output_directory / "results.jsonl")[0]
@@ -975,8 +1047,8 @@ def test_injection_and_private_input_are_escalated_before_generation(
     input_path = tmp_path / f"{blocked_check}.json"
     input_path.write_text(json.dumps([ticket]), encoding="utf-8")
     monkeypatch.setattr(
-        "cloudserve_support.processing.run_tickets.classify_ticket",
-        lambda ticket, settings: (_ for _ in ()).throw(
+        "cloudserve_support.processing.run_tickets.classify_ticket_batches",
+        lambda tickets, settings: (_ for _ in ()).throw(
             AssertionError("classification provider should not receive guarded input")
         ),
     )
@@ -987,6 +1059,7 @@ def test_injection_and_private_input_are_escalated_before_generation(
         database_path=tmp_path / "runtime.sqlite3",
         retriever=_UnexpectedRetriever(),
         generator=_UnexpectedDraftGenerator(),
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     result = _read_jsonl(output_directory / "results.jsonl")[0]
@@ -1029,8 +1102,8 @@ def test_private_context_key_is_redacted_from_handoff(
     input_path = tmp_path / "private-context-key.json"
     input_path.write_text(json.dumps([ticket]), encoding="utf-8")
     monkeypatch.setattr(
-        "cloudserve_support.processing.run_tickets.classify_ticket",
-        lambda ticket, settings: (_ for _ in ()).throw(
+        "cloudserve_support.processing.run_tickets.classify_ticket_batches",
+        lambda tickets, settings: (_ for _ in ()).throw(
             AssertionError("classification provider should not receive guarded input")
         ),
     )
@@ -1041,6 +1114,7 @@ def test_private_context_key_is_redacted_from_handoff(
         database_path=tmp_path / "runtime.sqlite3",
         retriever=_UnexpectedRetriever(),
         generator=_UnexpectedDraftGenerator(),
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     result = _read_jsonl(output_directory / "results.jsonl")[0]
@@ -1095,6 +1169,7 @@ def test_expired_source_is_blocked_before_draft_generation(
         database_path=tmp_path / "runtime.sqlite3",
         retriever=_ExpiredSourceRetriever(),
         generator=_UnexpectedDraftGenerator(),
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     result = _read_jsonl(output_directory / "results.jsonl")[0]
@@ -1149,6 +1224,7 @@ def test_private_retrieved_source_is_withheld_before_generator_call(
         database_path=tmp_path / "runtime.sqlite3",
         retriever=_PrivateSourceRetriever(),
         generator=_UnexpectedDraftGenerator(),
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     result = _read_jsonl(output_directory / "results.jsonl")[0]
@@ -1186,6 +1262,11 @@ def test_operational_safety_rules_prevent_drafts_after_classifier_misclassificat
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    def choose_labels(ticket_fields: dict[str, object]) -> tuple[str, str]:
+        intent = "deployment" if ticket_fields["subject"] == "It is not working" else "data"
+        return intent, "low"
+
+    _install_decisions_api_mock(monkeypatch, choose_labels)
     schema_directory = tmp_path / "schemas" / "outputs"
     initialize_output_schemas(schema_directory)
     monkeypatch.setattr(
@@ -1215,28 +1296,11 @@ def test_operational_safety_rules_prevent_drafts_after_classifier_misclassificat
     input_path = tmp_path / "safety-regressions.json"
     input_path.write_text(json.dumps(records), encoding="utf-8")
 
-    def misclassify_each_ticket_as_an_ordinary_topic(ticket, settings):
-        intent = "deployment" if ticket.ticket_id == "VAL-0003" else "data"
-        return TicketClassification(
-            intent=intent,
-            urgency="low",
-            confidence=0.97,
-            alternatives=(),
-            uncertainties=(),
-            reason="deliberately incorrect test classification",
-            provider="offline",
-            model_name=OFFLINE_CLASSIFIER_MODEL,
-            provider_status="classified",
-        )
-
-    monkeypatch.setattr(
-        "cloudserve_support.processing.run_tickets.classify_ticket",
-        misclassify_each_ticket_as_an_ordinary_topic,
-    )
     _, output_directory, metrics = run_ticket_batch(
         input_path=input_path,
         output_root=tmp_path / "outputs",
         database_path=tmp_path / "runtime.sqlite3",
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     results = _read_jsonl(output_directory / "results.jsonl")
@@ -1280,6 +1344,7 @@ def test_generated_ticket_id_collision_uses_unique_storage_ids(
         input_path=input_path,
         output_root=tmp_path / "outputs",
         database_path=tmp_path / "runtime.sqlite3",
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     results = _read_jsonl(output_directory / "results.jsonl")
@@ -1344,6 +1409,7 @@ def test_unpaired_surrogate_ticket_id_degrades_and_later_ticket_completes(
         input_path=input_path,
         output_root=tmp_path / "outputs",
         database_path=tmp_path / "runtime.sqlite3",
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     results = _read_jsonl(output_directory / "results.jsonl")
@@ -1428,6 +1494,7 @@ def test_unpaired_surrogate_in_operational_context_degrades_and_continues(
         input_path=input_path,
         output_root=tmp_path / "outputs",
         database_path=tmp_path / "runtime.sqlite3",
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     results = _read_jsonl(output_directory / "results.jsonl")

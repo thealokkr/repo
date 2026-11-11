@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
+import openai
 import pytest
 
-from cloudserve_support.classification.ticket_classification import OFFLINE_CLASSIFIER_MODEL
+from cloudserve_support.classification.ticket_classification import (
+    DECISIONS_CLASSIFIER_MODEL,
+    INTENT_VALUES,
+    URGENCY_VALUES,
+)
+from cloudserve_support.config import Settings
 from cloudserve_support.ingestion.ticket_normalization import normalize_ticket_record
 from cloudserve_support.routing.policy_calibration import (
     calibrate_development_routing_policy,
@@ -16,15 +23,15 @@ from cloudserve_support.routing.routing_policy import route_ticket_classificatio
 
 
 def _policy() -> dict[str, object]:
-    """Build a frozen offline policy fixture with an explicit development provenance."""
+    """Build a supported Decisions policy fixture for deterministic route checks."""
     return {
         "schema_version": 1,
-        "policy_version": "cs003-v1",
+        "policy_version": "cs003-v5",
         "classification_confidence_threshold": 0.75,
         "threshold_source": "development operational confidence distribution",
         "calibration_method": "test fixture",
-        "classifier_provider": "offline",
-        "classifier_model": OFFLINE_CLASSIFIER_MODEL,
+        "classifier_provider": "openai",
+        "classifier_model": DECISIONS_CLASSIFIER_MODEL,
         "frozen": True,
         "calibration_source": {
             "source_set": "development",
@@ -44,18 +51,14 @@ def _classification(
     intent: str,
     *,
     confidence: float = 0.9,
-    uncertainties: list[str] | None = None,
 ) -> dict[str, object]:
     """Build one provider-verified classification for deterministic route checks."""
     return {
         "intent": intent,
         "urgency": "medium",
         "confidence": confidence,
-        "alternatives": [],
-        "uncertainties": uncertainties or [],
-        "reason": "test classification",
-        "provider": "offline",
-        "model_name": OFFLINE_CLASSIFIER_MODEL,
+        "provider": "openai",
+        "model_name": DECISIONS_CLASSIFIER_MODEL,
         "provider_status": "classified",
     }
 
@@ -76,12 +79,9 @@ def test_protected_and_unclear_intents_always_escalate(intent: str) -> None:
     assert result.matched_rule == f"protected_{intent}"
 
 
-def test_confidence_uncertainty_and_missing_evidence_route_to_human_review() -> None:
+def test_low_confidence_and_missing_evidence_route_to_human_review() -> None:
     low_confidence = route_ticket_classification(
         _classification("api", confidence=0.74), _policy()
-    )
-    uncertain = route_ticket_classification(
-        _classification("api", uncertainties=["Two intents are plausible."]), _policy()
     )
     no_evidence = route_ticket_classification(
         _classification("api"), _policy(), evidence_ready=False
@@ -89,8 +89,6 @@ def test_confidence_uncertainty_and_missing_evidence_route_to_human_review() -> 
 
     assert low_confidence.route == "escalate"
     assert low_confidence.matched_rule == "below_classification_confidence_threshold"
-    assert uncertain.route == "escalate"
-    assert uncertain.matched_rule == "classification_uncertain"
     assert no_evidence.route == "escalate"
     assert no_evidence.matched_rule == "evidence_not_ready"
 
@@ -297,7 +295,9 @@ def test_fallback_or_model_mismatch_degrades() -> None:
     assert route_ticket_classification(mismatch, _policy()).route == "degrade"
 
 
-def test_development_calibration_ignores_fixture_labels_and_history(tmp_path) -> None:
+def test_development_calibration_ignores_fixture_labels_and_history(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     development_path = tmp_path / "development_tickets.json"
     ticket = {
         "ticket_id": "DEV-1",
@@ -308,12 +308,48 @@ def test_development_calibration_ignores_fixture_labels_and_history(tmp_path) ->
         "history": {"first_contact_resolution": True},
     }
     development_path.write_text(json.dumps([ticket]), encoding="utf-8")
-    first = calibrate_development_routing_policy(development_path)
+    observed_inputs: list[str] = []
+
+    def choice_answer(name: str, selected: str, values: frozenset[str]) -> SimpleNamespace:
+        alternate = next(value for value in sorted(values) if value != selected)
+        probabilities = [
+            SimpleNamespace(
+                value=value,
+                probability=0.8 if value == selected else 0.2 if value == alternate else 0.0,
+            )
+            for value in sorted(values)
+        ]
+        return SimpleNamespace(
+            type="choice",
+            name=name,
+            choice=selected,
+            confidence=0.8,
+            probabilities=probabilities,
+        )
+
+    class FakeOpenAI:
+        def __init__(self, **options: object) -> None:
+            self.decisions = SimpleNamespace(create=self.create_decision)
+
+        @staticmethod
+        def create_decision(**request: object) -> SimpleNamespace:
+            observed_inputs.append(request["input"])
+            return SimpleNamespace(
+                model=DECISIONS_CLASSIFIER_MODEL,
+                answers=[
+                    choice_answer("ticket_0_intent", "api", INTENT_VALUES),
+                    choice_answer("ticket_0_urgency", "medium", URGENCY_VALUES),
+                ],
+            )
+
+    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
+    settings = Settings(openai_api_key="test-key")
+    first = calibrate_development_routing_policy(development_path, settings=settings)
 
     ticket["labels"] = {"intent": "different-label", "expected_route": "auto_respond"}
     ticket["history"] = {"first_contact_resolution": False, "csat_rating": 1}
     development_path.write_text(json.dumps([ticket]), encoding="utf-8")
-    second = calibrate_development_routing_policy(development_path)
+    second = calibrate_development_routing_policy(development_path, settings=settings)
 
     assert first["classification_confidence_threshold"] == second[
         "classification_confidence_threshold"
@@ -323,6 +359,10 @@ def test_development_calibration_ignores_fixture_labels_and_history(tmp_path) ->
     ]["operational_sha256"]
     assert first["calibration_source"]["evaluation_fields_used"] is False
     assert first["calibration_source"]["source_set"] == "development"
+    assert first["classifier_provider"] == "openai"
+    assert first["classifier_model"] == DECISIONS_CLASSIFIER_MODEL
+    assert len(observed_inputs) == 2
+    assert all("fixture-secret" not in value and "first_contact_resolution" not in value for value in observed_inputs)
     validate_frozen_routing_policy(first)
 
 

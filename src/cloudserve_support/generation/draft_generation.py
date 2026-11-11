@@ -248,8 +248,7 @@ class OpenAIDraftGenerationProvider:
 
 def create_draft_generation_provider(settings: Settings) -> DraftGenerationProvider:
     """Select a draft provider independently when explicitly configured."""
-    provider = settings.draft_generation_provider or settings.provider
-    if provider == "OPENAI":
+    if settings.draft_generation_provider == "OPENAI":
         return OpenAIDraftGenerationProvider(settings)
     return OfflineDraftGenerationProvider()
 

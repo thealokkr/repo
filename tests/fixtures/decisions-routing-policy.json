@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "policy_version": "cs003-v5",
+  "classification_confidence_threshold": 0.65,
+  "threshold_source": "test fixture",
+  "calibration_method": "test fixture",
+  "classifier_provider": "openai",
+  "classifier_model": "gpt-6-luna",
+  "frozen": true,
+  "calibration_source": {
+    "source_set": "development",
+    "input_ref": "test fixture",
+    "operational_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "total_records": 1,
+    "valid_operational_records": 1,
+    "confidence_sample_count": 1,
+    "excluded_invalid_records": 0,
+    "failed_classifications": 0,
+    "evaluation_fields_used": false
+  }
+}

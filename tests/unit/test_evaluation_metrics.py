@@ -42,8 +42,8 @@ def _result(*, input_index: int, ticket_id: str) -> dict[str, object]:
             "intent": "billing",
             "urgency": "medium",
             "confidence": 0.8,
-            "provider": "offline",
-            "model_name": "offline-rule-based-v1",
+            "provider": "openai",
+            "model_name": "gpt-6-luna",
         },
         "sources": [source],
         "draft": {
@@ -131,7 +131,7 @@ def test_evaluate_completed_run_reports_reproducible_metrics_and_segments(
     assert report["integrity"]["status"] == "complete"
     assert report["input_sha256"]
     assert report["policy_provenance"]["policy"]["policy_version"] == "cs003-v1"
-    assert report["policy_provenance"]["classifier_model_names"] == ["offline-rule-based-v1"]
+    assert report["policy_provenance"]["classifier_model_names"] == ["gpt-6-luna"]
     assert report["policy_provenance"]["fingerprint_status"] == "available"
     assert report["policy_provenance"]["fingerprints"]["policy_file_sha256"] == "a" * 64
     observed = report["run_observed"]
@@ -142,8 +142,9 @@ def test_evaluate_completed_run_reports_reproducible_metrics_and_segments(
     assert technical["classification"]["precision_target_status"] == "pass"
     assert technical["classification"]["per_class"]["billing"]["precision_target_status"] == "met"
     assert technical["classification"]["confusion_matrix"]["billing"]["billing"] == 1
-    assert technical["urgency"]["target"] is None
-    assert technical["urgency"]["target_status"] == "measured_no_numeric_target"
+    assert technical["urgency"]["precision_target"] == 0.70
+    assert technical["urgency"]["target_status"] == "pass"
+    assert technical["urgency"]["per_class"]["medium"]["precision_target_status"] == "met"
     assert technical["urgency"]["confusion_matrix"]["medium"]["medium"] == 1
     assert technical["route_accuracy"]["value"] == 1
     assert technical["retrieval_hit_rate"]["value"] == 1
@@ -245,7 +246,8 @@ def test_classification_target_marks_zero_predictions_not_applicable_and_reports
     assert classification["per_class"]["account_access"]["precision_target_status"] == "not_applicable"
     assert classification["per_class"]["account_access"]["recall"]["value"] == 0
     urgency = technical["urgency"]
-    assert urgency["target"] is None
+    assert urgency["precision_target"] == 0.70
+    assert urgency["target_status"] == "below_target"
     assert urgency["confusion_matrix"]["high"]["medium"] == 1
     assert urgency["confusion_matrix"]["low"]["medium"] == 1
     assert urgency["prioritization_error_counts"] == {
@@ -307,6 +309,7 @@ def test_malformed_development_labels_fail_reconciliation_and_block_precision_pa
     )
     classification = report["run_observed"]["technical"]["classification"]
     assert classification["precision_target_status"] == "invalid_evaluation_data"
+    assert report["run_observed"]["technical"]["urgency"]["target_status"] == "invalid_evaluation_data"
     assert "bogus_intent" not in classification["per_class"]
     assert report["criteria"]["confidence_calibration"]["status"] == "not_measurable"
     group_quality = report["criteria"]["group_quality_variation"]

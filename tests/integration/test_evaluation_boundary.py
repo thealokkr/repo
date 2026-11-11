@@ -9,6 +9,10 @@ from pathlib import Path
 from cloudserve_support.knowledge.retrieval import RetrievalResult
 from cloudserve_support.processing.run_tickets import run_ticket_batch
 
+TEST_ROUTING_POLICY_PATH = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "decisions-routing-policy.json"
+)
+
 
 class _NoEvidenceRetriever:
     """Return no KB evidence without contacting a provider."""
@@ -66,12 +70,14 @@ def test_labels_and_history_change_only_post_run_evaluation(
         output_root=output_root,
         database_path=database_path,
         retriever=_NoEvidenceRetriever(),
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
     _, changed_output, _ = run_ticket_batch(
         input_path=changed_input,
         output_root=output_root,
         database_path=database_path,
         retriever=_NoEvidenceRetriever(),
+        policy_path=TEST_ROUTING_POLICY_PATH,
     )
     first_result = _read_jsonl(first_output / "results.jsonl")[0]
     changed_result = _read_jsonl(changed_output / "results.jsonl")[0]

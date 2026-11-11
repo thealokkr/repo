@@ -145,7 +145,6 @@ def test_normalized_ticket_returns_ranked_chroma_passages_from_packaged_source(
     query_text = f"{ticket.subject}\n{ticket.body}"
     retriever = KnowledgeRetriever(
         Settings(
-            provider="OFFLINE",
             openai_api_key="test-key",
             embedding_model="text-embedding-3-small",
             llm_model="gpt-6-luna",
@@ -200,7 +199,6 @@ def test_packaged_index_returns_current_source_ids_without_embedding_service() -
     stored = collection.get(ids=[target["id"]], include=["embeddings"])
     retriever = KnowledgeRetriever(
         Settings(
-            provider="OFFLINE",
             openai_api_key="test-key",
             embedding_model="text-embedding-3-small",
             llm_model="gpt-6-luna",

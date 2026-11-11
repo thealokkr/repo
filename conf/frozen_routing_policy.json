@@ -11,9 +11,9 @@
     "total_records": 500,
     "valid_operational_records": 500
   },
-  "classification_confidence_threshold": 0.91,
-  "classifier_model": "offline-rule-based-v5",
-  "classifier_provider": "offline",
+  "classification_confidence_threshold": 0.74,
+  "classifier_model": "gpt-6-luna",
+  "classifier_provider": "openai",
   "frozen": true,
   "policy_version": "cs003-v5",
   "schema_version": 1,

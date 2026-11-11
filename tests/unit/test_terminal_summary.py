@@ -95,10 +95,12 @@ def test_terminal_summary_reports_prediction_metrics_and_post_run_label_matches(
         "meeting_class_count": 1,
         "note": "Development-set criterion; unsupported or unpredicted classes are not applicable and do not count as meeting the target.",
     }
-    assert summary["urgency_quality"]["target"] is None
-    assert summary["urgency_quality"]["target_status"] == "measured_no_numeric_target"
+    assert summary["urgency_quality"]["precision_target"] == 0.70
+    assert summary["urgency_quality"]["target_status"] == "below_target"
     assert summary["urgency_quality"]["exact_match_count"] == 2
     assert summary["urgency_quality"]["sample_count"] == 3
+    assert summary["urgency_quality"]["per_class"]["low"]["precision"] == 0.5
+    assert summary["urgency_quality"]["per_class"]["low"]["precision_target_status"] == "below_target"
     assert summary["label_match_counts"]["urgency"] == {
         "matched": 2,
         "mismatched": 1,

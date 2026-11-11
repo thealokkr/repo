@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from cloudserve_support.classification.ticket_classification import INTENT_VALUES
+from cloudserve_support.classification.ticket_classification import (
+    DECISIONS_CLASSIFIER_MODEL,
+    INTENT_VALUES,
+)
 from cloudserve_support.domain.ticket import CanonicalTicket
 from cloudserve_support.guardrails.operational_safety import (
     detect_protected_intent,
@@ -62,7 +65,6 @@ def route_ticket_classification(
         "provider",
         "model_name",
         "confidence",
-        "uncertainties",
     }
     if not required_classification_fields.issubset(classification):
         return _degrade(
@@ -90,7 +92,6 @@ def route_ticket_classification(
     intent = classification["intent"]
     provider_status = classification["provider_status"]
     confidence = classification["confidence"]
-    uncertainties = classification["uncertainties"]
     threshold = policy["classification_confidence_threshold"]
     if not isinstance(intent, str) or intent not in INTENT_VALUES:
         return _degrade(
@@ -105,14 +106,6 @@ def route_ticket_classification(
     ):
         return _degrade(
             "Classification confidence is missing or invalid; manual review is required.",
-            "classification_signal_invalid",
-            evidence_ready,
-        )
-    if not isinstance(uncertainties, (list, tuple)) or not all(
-        isinstance(item, str) for item in uncertainties
-    ):
-        return _degrade(
-            "Classification uncertainty signals are invalid; manual review is required.",
             "classification_signal_invalid",
             evidence_ready,
         )
@@ -147,7 +140,9 @@ def route_ticket_classification(
             evidence_ready,
         )
     model_matches_policy = (
-        classification["provider"] == policy["classifier_provider"]
+        policy["classifier_provider"] == "openai"
+        and policy["classifier_model"] == DECISIONS_CLASSIFIER_MODEL
+        and classification["provider"] == policy["classifier_provider"]
         and classification["model_name"] == policy["classifier_model"]
     )
     if provider_status != "classified" or not model_matches_policy:
@@ -192,14 +187,6 @@ def route_ticket_classification(
             reason=f"The {intent.replace('_', ' ')} category requires human review.",
             matched_rule=f"protected_{intent}",
             protected_case=True,
-            evidence_ready=evidence_ready,
-        )
-    if classification["uncertainties"]:
-        return RoutingDecision(
-            route="escalate",
-            reason="Classification has unresolved uncertainty; human review is required.",
-            matched_rule="classification_uncertain",
-            protected_case=False,
             evidence_ready=evidence_ready,
         )
     if confidence < threshold:

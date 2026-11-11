@@ -23,6 +23,8 @@ EXPECTED_ROUTE_LABEL_VALUES = frozenset(
     {"auto_respond", "draft_for_review", "escalate", "degrade"}
 )
 PUBLIC_ROUTE_VALUES = frozenset({"draft_for_review", "escalate", "degrade"})
+INTENT_PRECISION_TARGET = 0.85
+URGENCY_PRECISION_TARGET = 0.70
 def evaluate_completed_run(
     *,
     run_id: str,
@@ -273,7 +275,7 @@ def _technical_metrics(
             )
         if support == 0 or predicted_count == 0:
             precision_target_status = "not_applicable"
-        elif precision["value"] >= 0.85:
+        elif precision["value"] >= INTENT_PRECISION_TARGET:
             precision_target_status = "met"
         else:
             precision_target_status = "below_target"
@@ -333,18 +335,41 @@ def _technical_metrics(
         predicted_count = sum(
             prediction == urgency for _, prediction, _ in urgency_pairs
         )
+        precision = _metric(
+            true_positive,
+            predicted_count,
+            urgency_missing_count,
+            "No predictions for this urgency class.",
+        )
+        if support == 0 or predicted_count == 0:
+            precision_target_status = "not_applicable"
+        elif precision["value"] >= URGENCY_PRECISION_TARGET:
+            precision_target_status = "met"
+        else:
+            precision_target_status = "below_target"
         urgency_per_class[urgency] = {
-            "precision": _metric(
-                true_positive, predicted_count, urgency_missing_count,
-                "No predictions for this urgency class.",
-            ),
+            "precision": precision,
             "recall": _metric(
                 true_positive, support, urgency_missing_count,
                 "No labeled support for this urgency class.",
             ),
             "support": support,
             "predicted_count": predicted_count,
+            "precision_target_status": precision_target_status,
         }
+    urgency_target_classes = [
+        row for row in urgency_per_class.values() if row["support"] > 0
+    ]
+    urgency_target_met_count = sum(
+        row["precision_target_status"] == "met" for row in urgency_target_classes
+    )
+    urgency_target_status = (
+        "pass"
+        if urgency_target_classes and urgency_target_met_count == len(urgency_target_classes)
+        else "below_target"
+        if urgency_target_classes
+        else "not_applicable"
+    )
     urgency_confusion_predictions = set(urgency_predicted_classes)
     if urgency_missing_count:
         urgency_confusion_predictions.add("__unavailable_prediction__")
@@ -539,7 +564,7 @@ def _technical_metrics(
                 input_count - len(intent_pairs),
                 "Intent labels or predictions are missing.",
             ),
-            "precision_target": 0.85,
+            "precision_target": INTENT_PRECISION_TARGET,
             "precision_target_status": intent_target_status,
             "precision_classes_with_support": len(intent_target_classes),
             "precision_classes_meeting_target": intent_target_met_count,
@@ -553,8 +578,15 @@ def _technical_metrics(
         },
         "urgency": {
             "status": "available" if urgency_pairs else "not_applicable",
-            "target": None,
-            "target_status": "measured_no_numeric_target" if urgency_pairs else "not_applicable",
+            "precision_target": URGENCY_PRECISION_TARGET,
+            "target_status": urgency_target_status,
+            "precision_classes_with_support": len(urgency_target_classes),
+            "precision_classes_meeting_target": urgency_target_met_count,
+            "precision_target_note": (
+                "Project-set target: at least 70% precision for each urgency class with labeled "
+                "support. Classes without labeled support or predictions are not applicable and "
+                "do not count as meeting the target."
+            ),
             "exact_match_rate": _metric(
                 sum(expected == predicted for expected, predicted, _ in urgency_pairs),
                 len(urgency_pairs),
@@ -568,7 +600,7 @@ def _technical_metrics(
             "confusion_matrix": urgency_confusion,
             "prioritization_error_counts": dict(sorted(urgency_direction_counts.items())),
             "prioritization_errors": urgency_errors,
-            "note": "Urgency performance is reported descriptively; no numeric acceptance threshold is specified.",
+            "note": "Urgency precision is reported against the project-set target; recall, exact agreement, and prioritization trade-offs remain diagnostic.",
         },
         "route_accuracy": _metric(
             sum(expected == actual for expected, actual, _ in route_pairs),
@@ -1109,7 +1141,7 @@ def _single_policy_provenance(results: list[dict[str, Any]]) -> dict[str, Any]:
                 classification.get("provider")
                 for result in results
                 if isinstance((classification := result.get("classification")), dict)
-                and classification.get("provider") in {"offline", "openai"}
+                and classification.get("provider") == "openai"
             }
         ),
         "classifier_model_names": sorted(

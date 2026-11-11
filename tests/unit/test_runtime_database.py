@@ -18,6 +18,10 @@ from cloudserve_support.persistence.runtime_database import (
 )
 from cloudserve_support.processing.run_tickets import run_ticket_batch
 
+TEST_ROUTING_POLICY_PATH = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "decisions-routing-policy.json"
+)
+
 
 def test_run_audit_events_are_chronological_and_replay_decision_evidence(
     tmp_path: Path,
@@ -96,7 +100,7 @@ def test_audit_persistence_failure_rolls_back_and_does_not_return_success(
         "status": "completed",
         "route": "escalate",
         "reason": "Held for review.",
-        "classification": {"model_name": "test", "alternatives": []},
+        "classification": {"model_name": "test"},
         "routing": {
             "confidence_threshold": 0.5,
             "protected_case": True,
@@ -128,11 +132,15 @@ def test_audit_persistence_failure_rolls_back_and_does_not_return_success(
             input_path=input_path,
             output_root=tmp_path / "outputs",
             database_path=database_path,
+            policy_path=TEST_ROUTING_POLICY_PATH,
         )
 
     connection = sqlite3.connect(database_path)
     try:
-        assert connection.execute("SELECT COUNT(*) FROM processing_runs").fetchone()[0] == 0
+        run_status = connection.execute(
+            "SELECT status FROM processing_runs"
+        ).fetchone()
+        assert run_status == ("failed",)
         assert connection.execute("SELECT COUNT(*) FROM ticket_runs").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == 0
     finally:

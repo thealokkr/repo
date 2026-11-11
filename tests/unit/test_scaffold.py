@@ -25,11 +25,11 @@ def test_cli_without_arguments_shows_help(capsys: pytest.CaptureFixture[str]) ->
     assert "usage: cloudserve" in capsys.readouterr().out
 
 
-def test_settings_can_load_without_provider_credentials() -> None:
+def test_settings_can_load_without_api_credentials() -> None:
     settings = Settings.from_env({})
 
-    assert settings.provider == "OFFLINE"
     assert settings.openai_api_key is None
+    assert settings.draft_generation_provider == "OPENAI"
     assert settings.embedding_model == "text-embedding-3-small"
     assert settings.quality_judge_model == "gpt-6-luna"
 
@@ -52,14 +52,6 @@ def test_missing_provider_key_has_actionable_secret_safe_error() -> None:
         "code": "missing_openai_api_key",
         "message": result.value.message,
     }
-
-
-def test_unsupported_provider_has_structured_error() -> None:
-    with pytest.raises(ConfigurationError) as result:
-        Settings.from_env({"LLM_PROVIDER": "not-a-supported-provider"})
-
-    assert result.value.code == "unsupported_provider"
-    assert "not-a-supported-provider" not in result.value.message
 
 
 @pytest.mark.parametrize(

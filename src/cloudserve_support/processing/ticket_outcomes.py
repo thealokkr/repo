@@ -181,7 +181,7 @@ def build_ticket_outcome(
     ):
         error = {
             "code": "classification_unavailable",
-            "message": "; ".join(classification.uncertainties)
+            "message": classification.failure_reason
             or "Classification did not match the frozen policy model.",
         }
         route = "degrade"
@@ -386,6 +386,7 @@ def build_ticket_outcome(
             retrieval=retrieval_payload,
             sources=eligible_sources,
             reason=reason,
+            classification_failure_reason=classification.failure_reason,
             attempted_steps=_describe_attempted_steps(
                 classification=classification_payload,
                 retrieval=retrieval_payload,
@@ -511,10 +512,13 @@ def _build_human_handoff(
     retrieval: dict[str, Any],
     sources: tuple[dict[str, Any], ...],
     reason: str,
+    classification_failure_reason: str | None,
     attempted_steps: list[str],
 ) -> dict[str, Any]:
     """Assemble an honest handoff from observed ticket and pipeline facts."""
-    uncertainties = list(classification["uncertainties"])
+    uncertainties = (
+        [classification_failure_reason] if classification_failure_reason else []
+    )
     if retrieval["status"] != "ready":
         uncertainties.append(retrieval["reason"])
     if not sources:

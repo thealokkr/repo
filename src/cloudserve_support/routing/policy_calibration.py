@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from cloudserve_support.classification.ticket_classification import (
-    OFFLINE_CLASSIFIER_MODEL,
-    classify_ticket,
+    DECISIONS_CLASSIFIER_MODEL,
+    classify_tickets,
 )
 from cloudserve_support.config import Settings
 from cloudserve_support.domain.ticket import CanonicalTicket
@@ -33,10 +33,9 @@ def calibrate_development_routing_policy(
 ) -> dict[str, Any]:
     """Use only normalized development ticket text to select a frozen confidence floor."""
     settings = settings or Settings.from_env()
-    classifier_provider = settings.provider.lower()
-    classifier_model = (
-        OFFLINE_CLASSIFIER_MODEL if settings.provider == "OFFLINE" else settings.llm_model
-    )
+    settings.require_openai_api_key()
+    classifier_provider = "openai"
+    classifier_model = DECISIONS_CLASSIFIER_MODEL
     records = read_ticket_records(development_input_path)
     tickets: list[CanonicalTicket] = [
         normalize_ticket_record(record, input_index=index)
@@ -53,7 +52,7 @@ def calibrate_development_routing_policy(
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
-    classifications = [classify_ticket(ticket, settings) for ticket in valid_tickets]
+    classifications = classify_tickets(valid_tickets, settings)
     failed_classifications = sum(
         result.provider_status != "classified" for result in classifications
     )
@@ -162,12 +161,16 @@ def validate_frozen_routing_policy(policy: dict[str, Any]) -> None:
         or policy["frozen"] is not True
         or source["source_set"] != "development"
         or source["evaluation_fields_used"] is not False
-        or policy["classifier_provider"] not in {"offline", "openai"}
+        or not isinstance(policy["classifier_provider"], str)
+        or not policy["classifier_provider"]
         or not isinstance(policy["classifier_model"], str)
         or not policy["classifier_model"]
-        or (
-            policy["classifier_provider"] == "offline"
-            and policy["classifier_model"] != OFFLINE_CLASSIFIER_MODEL
-        )
     ):
         raise ValueError("Frozen routing policy must come from development operational data.")
+    if (
+        policy["classifier_provider"] == "openai"
+        and policy["classifier_model"] != DECISIONS_CLASSIFIER_MODEL
+    ):
+        raise ValueError(
+            "Frozen routing policy classifier must use the Decisions API model gpt-6-luna."
+        )

@@ -72,7 +72,7 @@ processing_runs (1) ──── (many) ticket_runs (1) ──── (many) audi
 | `input_summary` | Brief record of the relevant input at this event. |
 | `model_name`, `model_version`, `prompt_version` | Model and prompt provenance when a model was used. |
 | `requirement_ids_json` | Requirement identifiers applied at this stage. |
-| `prediction_json`, `alternatives_json`, `threshold_applied` | Predicted value, alternatives considered, and applicable confidence threshold. |
+| `prediction_json`, `alternatives_json`, `threshold_applied` | Predicted classification and applicable confidence threshold. `alternatives_json` remains an empty audit field; the classifier exports only its selected intent and urgency. |
 | `action_taken`, `reason` | Resulting action and explanation, including escalation or review rationale. |
 | `guardrail_results_json` | Guardrail checks and their results. |
 | `sources_json` | Snapshot of cited KB article/passage identity and supporting source details used for the decision. This preserves what was cited even if the index is later rebuilt. |

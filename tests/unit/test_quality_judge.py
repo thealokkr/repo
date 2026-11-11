@@ -271,7 +271,6 @@ def test_quality_scorecard_applies_targets_and_marks_partial_samples_incomplete(
 def test_quality_judge_model_setting_is_separate_from_operational_model() -> None:
     settings = Settings.from_env(
         {
-            "LLM_PROVIDER": "OFFLINE",
             "OPENAI_API_KEY": "judge-secret",
             "OPENAI_LLM_MODEL": "operational-model",
         }
@@ -283,12 +282,10 @@ def test_quality_judge_model_setting_is_separate_from_operational_model() -> Non
 
     judge_settings = Settings.from_quality_judge_env(
         {
-            "LLM_PROVIDER": "invalid-operational-setting",
             "OPENAI_LLM_MODEL": "operational-model",
             "OPENAI_QUALITY_JUDGE_MODEL": "gpt-6-luna",
             "OPENAI_API_KEY": "judge-secret",
         }
     )
-    assert judge_settings.provider == "OFFLINE"
     assert judge_settings.llm_model == "gpt-6-luna"
     assert judge_settings.quality_judge_model == "gpt-6-luna"

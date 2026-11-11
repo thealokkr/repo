@@ -19,8 +19,9 @@ from cloudserve_support.evaluation.quality_judge import (
 from cloudserve_support.knowledge.retrieval import RetrievalResult
 from cloudserve_support.processing.run_tickets import run_ticket_batch
 
-
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+TEST_ROUTING_POLICY_PATH = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "decisions-routing-policy.json"
+)
 
 
 class _NoEvidenceRetriever:
@@ -118,7 +119,6 @@ def _prepare_run_artifacts(
     *,
     ticket_count: int = 20,
 ) -> tuple[Path, Path, list[dict[str, Any]]]:
-    monkeypatch.setenv("LLM_PROVIDER", "OFFLINE")
     monkeypatch.setenv("OPENAI_API_KEY", "")
     records = [
         {
@@ -137,7 +137,7 @@ def _prepare_run_artifacts(
         input_path=input_path,
         output_root=tmp_path / "outputs",
         database_path=tmp_path / "runtime.sqlite3",
-        policy_path=REPOSITORY_ROOT / "data/policy/frozen_routing_policy.json",
+        policy_path=TEST_ROUTING_POLICY_PATH,
         retriever=_NoEvidenceRetriever(),
     )
     results = _read_jsonl(run_directory / "results.jsonl")

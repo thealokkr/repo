@@ -12,7 +12,7 @@ from pathlib import Path
 from cloudserve_support.processing.run_tickets import (
     DEFAULT_DATABASE_PATH,
     DEFAULT_OUTPUT_ROOT,
-    DEFAULT_ROUTING_POLICY_PATH,
+    DEFAULT_ROUTING_POLICY_CONFIG_PATH,
     run_ticket_batch,
 )
 from cloudserve_support.errors import CloudServeError
@@ -61,8 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--policy",
         type=Path,
-        default=DEFAULT_ROUTING_POLICY_PATH,
-        help=f"Frozen development-calibrated routing policy (default: {DEFAULT_ROUTING_POLICY_PATH})",
+        default=DEFAULT_ROUTING_POLICY_CONFIG_PATH,
+        help=(
+            "Frozen development-calibrated routing policy "
+            f"(default: {DEFAULT_ROUTING_POLICY_CONFIG_PATH})"
+        ),
     )
     run_parser.add_argument("--label", help="Optional human-readable label stored with this run")
 
@@ -80,8 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate_parser.add_argument(
         "--output",
         type=Path,
-        default=DEFAULT_ROUTING_POLICY_PATH,
-        help=f"Path for the frozen policy JSON (default: {DEFAULT_ROUTING_POLICY_PATH})",
+        default=DEFAULT_ROUTING_POLICY_CONFIG_PATH,
+        help=f"Path for the frozen policy JSON (default: {DEFAULT_ROUTING_POLICY_CONFIG_PATH})",
     )
     quality_parser = commands.add_parser(
         "evaluate-quality",

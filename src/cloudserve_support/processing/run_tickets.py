@@ -6,13 +6,16 @@ import json
 import sqlite3
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from cloudserve_support.classification.ticket_classification import (
+    DECISIONS_CLASSIFIER_MODEL,
+    TicketClassification,
+    classify_ticket_batches,
     classification_failure,
-    classify_ticket,
 )
 from cloudserve_support.config import Settings
 from cloudserve_support.domain.ticket import CanonicalTicket
@@ -56,7 +59,21 @@ from cloudserve_support.routing.routing_policy import route_ticket_classificatio
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DATABASE_PATH = REPO_ROOT / "data" / "runtime" / "cloudserve.sqlite3"
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "outputs"
-DEFAULT_ROUTING_POLICY_PATH = REPO_ROOT / "data" / "policy" / "frozen_routing_policy.json"
+DEFAULT_ROUTING_POLICY_CONFIG_PATH = REPO_ROOT / "conf" / "frozen_routing_policy.json"
+
+
+@dataclass
+class _PreparedTicket:
+    """Hold normalized and safety-checked ticket state before batch classification."""
+
+    input_index: int
+    ticket: CanonicalTicket
+    storage_ticket_id: str
+    issues: list[str]
+    duplicate_ticket_id: bool
+    pre_provider_guardrail_block: bool
+    classification: TicketClassification | None
+    classification_request_duration_seconds: float = 0.0
 
 
 def run_ticket_batch(
@@ -64,7 +81,7 @@ def run_ticket_batch(
     input_path: Path,
     output_root: Path = DEFAULT_OUTPUT_ROOT,
     database_path: Path = DEFAULT_DATABASE_PATH,
-    policy_path: Path = DEFAULT_ROUTING_POLICY_PATH,
+    policy_path: Path = DEFAULT_ROUTING_POLICY_CONFIG_PATH,
     label: str | None = None,
     retriever: KnowledgeRetriever | None = None,
     generator: DraftGenerationProvider | None = None,
@@ -76,6 +93,14 @@ def run_ticket_batch(
     policy_file_fingerprint = fingerprint_policy_file(resolved_policy_path)
     classifier_implementation_fingerprint = fingerprint_classifier_implementation()
     settings = Settings.from_env()
+    if settings.openai_api_key and (
+        policy["classifier_provider"] != "openai"
+        or policy["classifier_model"] != DECISIONS_CLASSIFIER_MODEL
+    ):
+        raise RuntimeError(
+            "The frozen routing policy does not match the Decisions classifier model. "
+            "Run `cloudserve calibrate --development-input PATH` before processing tickets."
+        )
     knowledge_retriever = retriever or KnowledgeRetriever(settings)
     draft_generator = generator or create_draft_generation_provider(settings)
     load_output_schemas()
@@ -102,16 +127,34 @@ def run_ticket_batch(
         )
         connection.commit()
         run_record_committed = True
-        seen_ticket_ids: set[str] = set()
-        used_storage_ticket_ids: set[str] = set()
-        for input_index, raw_ticket in enumerate(input_records):
+        prepared_tickets = _prepare_ticket_records(input_records)
+        classifiable_tickets = [
+            prepared_ticket
+            for prepared_ticket in prepared_tickets
+            if prepared_ticket.classification is None
+        ]
+        if classifiable_tickets:
+            classification_batches = classify_ticket_batches(
+                [prepared_ticket.ticket for prepared_ticket in classifiable_tickets],
+                settings,
+            )
+            for classification_batch in classification_batches:
+                for batch_offset, classification in enumerate(
+                    classification_batch.classifications
+                ):
+                    prepared_ticket = classifiable_tickets[
+                        classification_batch.start_index + batch_offset
+                    ]
+                    prepared_ticket.classification = classification
+                    prepared_ticket.classification_request_duration_seconds = (
+                        classification_batch.request_duration_seconds
+                    )
+
+        for prepared_ticket in prepared_tickets:
             ticket_started = time.perf_counter()
             result, storage_ticket_id, ticket = _build_ticket_result(
-                raw_ticket,
+                prepared_ticket,
                 run_id=run_id,
-                input_index=input_index,
-                seen_ticket_ids=seen_ticket_ids,
-                used_storage_ticket_ids=used_storage_ticket_ids,
                 settings=settings,
                 policy=policy,
                 policy_file_fingerprint=policy_file_fingerprint,
@@ -150,7 +193,6 @@ def run_ticket_batch(
                     "FR-03", "FR-04", "FR-05", "FR-06", "FR-07", "FR-08", "FR-11",
                 ],
                 prediction=result["classification"],
-                alternatives=result["classification"]["alternatives"],
                 threshold_applied=result["routing"]["confidence_threshold"],
                 guardrail_results={
                     "protected_case": result["routing"]["protected_case"],
@@ -162,7 +204,10 @@ def run_ticket_batch(
             )
             _commit_ticket_records(connection)
             result["processing_duration_seconds"] = max(
-                time.perf_counter() - ticket_started, 0.0
+                prepared_ticket.classification_request_duration_seconds
+                + time.perf_counter()
+                - ticket_started,
+                0.0,
             )
             generation_request_duration = result[
                 "draft_generation_request_duration_seconds"
@@ -227,12 +272,9 @@ def _commit_ticket_records(connection: sqlite3.Connection) -> None:
 
 
 def _build_ticket_result(
-    raw_ticket: Any,
+    prepared_ticket: _PreparedTicket,
     *,
     run_id: str,
-    input_index: int,
-    seen_ticket_ids: set[str],
-    used_storage_ticket_ids: set[str],
     settings: Settings,
     policy: dict[str, Any],
     policy_file_fingerprint: str,
@@ -240,49 +282,20 @@ def _build_ticket_result(
     retriever: KnowledgeRetriever,
     generator: DraftGenerationProvider,
 ) -> tuple[dict[str, Any], str, CanonicalTicket]:
-    """Normalize, classify, retrieve, apply guardrails, and produce one final outcome."""
-    ticket = normalize_ticket_record(raw_ticket, input_index=input_index)
-    ticket_id = ticket.ticket_id
-    issues = list(ticket.validation_errors)
-
-    duplicate = ticket.has_ticket_id and ticket_id in seen_ticket_ids
-    if ticket.has_ticket_id:
-        seen_ticket_ids.add(ticket_id)
-    if duplicate:
-        issues.append("ticket_id duplicates an earlier record in this run")
-    storage_ticket_id = ticket_id
-    if duplicate or storage_ticket_id in used_storage_ticket_ids:
-        storage_ticket_id = f"{ticket_id}#input-{input_index + 1:06d}"
-        collision_suffix = 2
-        while storage_ticket_id in used_storage_ticket_ids:
-            storage_ticket_id = (
-                f"{ticket_id}#input-{input_index + 1:06d}-{collision_suffix}"
-            )
-            collision_suffix += 1
-    used_storage_ticket_ids.add(storage_ticket_id)
-
-    operational_text = ticket_text_for_generation(ticket)
-    private_input_text = json.dumps(
-        filter_evaluation_context(ticket.context), ensure_ascii=False, default=str
-    )
-    ticket_injection_detected = contains_prompt_injection(operational_text)
-    private_input_detected = contains_private_data(operational_text) or contains_private_data(
-        private_input_text
-    )
-    pre_provider_guardrail_block = ticket_injection_detected or private_input_detected
-    classification = (
-        classification_failure(
+    """Retrieve, route, draft or hand off, and produce one final ticket outcome."""
+    ticket = prepared_ticket.ticket
+    input_index = prepared_ticket.input_index
+    storage_ticket_id = prepared_ticket.storage_ticket_id
+    issues = prepared_ticket.issues
+    duplicate = prepared_ticket.duplicate_ticket_id
+    pre_provider_guardrail_block = prepared_ticket.pre_provider_guardrail_block
+    classification = prepared_ticket.classification
+    if classification is None:
+        classification = classification_failure(
             provider="not_attempted",
-            model_name=settings.llm_model,
-            uncertainty=(
-                "Ticket validation failed before classification."
-                if issues
-                else "Private or instruction-like input was held for human review."
-            ),
+            model_name=DECISIONS_CLASSIFIER_MODEL,
+            uncertainty="Ticket was not included in a Decisions classification batch.",
         )
-        if issues or pre_provider_guardrail_block
-        else classify_ticket(ticket, settings)
-    )
     retrieval = (
         retriever.retrieve(ticket)
         if not issues and not pre_provider_guardrail_block
@@ -327,6 +340,65 @@ def _build_ticket_result(
         duplicate_ticket_id=duplicate,
     )
     return result, storage_ticket_id, ticket
+
+
+def _prepare_ticket_records(input_records: list[Any]) -> list[_PreparedTicket]:
+    """Normalize, deduplicate, and hold unsafe tickets out of classification batches."""
+    prepared_tickets: list[_PreparedTicket] = []
+    seen_ticket_ids: set[str] = set()
+    used_storage_ticket_ids: set[str] = set()
+    for input_index, raw_ticket in enumerate(input_records):
+        ticket = normalize_ticket_record(raw_ticket, input_index=input_index)
+        issues = list(ticket.validation_errors)
+        duplicate = ticket.has_ticket_id and ticket.ticket_id in seen_ticket_ids
+        if ticket.has_ticket_id:
+            seen_ticket_ids.add(ticket.ticket_id)
+        if duplicate:
+            issues.append("ticket_id duplicates an earlier record in this run")
+
+        storage_ticket_id = ticket.ticket_id
+        if duplicate or storage_ticket_id in used_storage_ticket_ids:
+            storage_ticket_id = f"{ticket.ticket_id}#input-{input_index + 1:06d}"
+            collision_suffix = 2
+            while storage_ticket_id in used_storage_ticket_ids:
+                storage_ticket_id = (
+                    f"{ticket.ticket_id}#input-{input_index + 1:06d}-{collision_suffix}"
+                )
+                collision_suffix += 1
+        used_storage_ticket_ids.add(storage_ticket_id)
+
+        operational_text = ticket_text_for_generation(ticket)
+        private_input_text = json.dumps(
+            filter_evaluation_context(ticket.context), ensure_ascii=False, default=str
+        )
+        pre_provider_guardrail_block = contains_prompt_injection(
+            operational_text
+        ) or contains_private_data(operational_text) or contains_private_data(
+            private_input_text
+        )
+        classification = None
+        if issues or pre_provider_guardrail_block:
+            classification = classification_failure(
+                provider="not_attempted",
+                model_name=DECISIONS_CLASSIFIER_MODEL,
+                uncertainty=(
+                    "Ticket validation failed before classification."
+                    if issues
+                    else "Private or instruction-like input was held for human review."
+                ),
+            )
+        prepared_tickets.append(
+            _PreparedTicket(
+                input_index=input_index,
+                ticket=ticket,
+                storage_ticket_id=storage_ticket_id,
+                issues=issues,
+                duplicate_ticket_id=duplicate,
+                pre_provider_guardrail_block=pre_provider_guardrail_block,
+                classification=classification,
+            )
+        )
+    return prepared_tickets
 
 
 def _utc_timestamp() -> str:
