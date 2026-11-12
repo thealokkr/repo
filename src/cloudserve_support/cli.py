@@ -9,6 +9,8 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from cloudserve_support.processing.run_tickets import (
     DEFAULT_DATABASE_PATH,
     DEFAULT_OUTPUT_ROOT,
@@ -128,6 +130,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.print_help()
         return 0
     parsed = parser.parse_args(arguments)
+    load_dotenv(REPOSITORY_ROOT / ".env", override=False)
     if parsed.command == "calibrate":
         try:
             policy = calibrate_development_routing_policy(parsed.development_input)

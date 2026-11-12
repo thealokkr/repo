@@ -21,7 +21,7 @@ def test_clean_checkout_configuration_is_pinned_and_secret_safe() -> None:
     assert "OPENAI_API_KEY=sk-" not in example
     gate_instructions = readme.split("### Reproducible development and validation gates", 1)[1]
     gate_instructions = gate_instructions.split("\n### ", 1)[0]
-    assert gate_instructions.count("uv run --env-file .env cloudserve run") == 2
+    assert gate_instructions.count("uv run cloudserve run") == 2
     assert "OPENAI_API_KEY=" not in gate_instructions
     assert "cannot establish whether retrieval and citation-quality criteria pass" in gate_instructions
     assert "may incur provider charges" in gate_instructions

@@ -64,8 +64,8 @@ The single test command for the repository is `uv run pytest`. The suite include
 Routing policy is configuration, so keep the calibrated policy in the `conf/` folder rather than in per-run output. Calibration writes `conf/frozen_routing_policy.json` by default, and the CLI run command reads that same file by default. Calibrate once from development tickets, review and commit the resulting configuration, then run development, validation, or other ticket batches without specifying `--output` or `--policy`:
 
 ```bash
-uv run --env-file .env cloudserve calibrate --development-input data/tickets/development_tickets.json
-uv run --env-file .env cloudserve run --input data/tickets/development_tickets.json --output-root outputs/development --database outputs/development.sqlite3 --label "development batch"
+uv run cloudserve calibrate --development-input data/tickets/development_tickets.json
+uv run cloudserve run --input data/tickets/development_tickets.json --output-root outputs/development --database outputs/development.sqlite3 --label "development batch"
 ```
 
 The run command has no interactive prompts or retry steps. Each invocation creates a unique run directory under `--output-root` with `results.jsonl`, `decision_log.jsonl`, `metrics.json`, and `exceptions.jsonl`. It also writes the SQLite run, ticket, and audit rows to `--database`. `--label` is optional metadata. Exit status `0` means the batch and exports completed, including when a ticket has a recorded degradation or malformed-record result; exit status `1` means startup, persistence, or export finalization failed. Calibration errors return `2`.
@@ -82,7 +82,7 @@ Ticket classification uses OpenAI's Decisions API (`POST /v1/decisions`) with na
 
 Classifier intent values are validated against the public result schema. OpenAI output is constrained to supported intent and urgency values, with confidence validated before routing. Provider failures or invalid output are marked as fallbacks and sent for manual review.
 
-For classifier calibration or batch commands that use values from `.env`, pass `--env-file .env` to `uv run` (for example, `uv run --env-file .env cloudserve run ...`). Otherwise export those variables in the shell.
+CloudServe CLI commands load values from the repository-root `.env` automatically. Values already exported in the shell take precedence. Direct Python commands that do not load `.env` themselves can use `uv run --env-file .env` or exported shell variables.
 
 After OpenAI calibration, run development evaluation and inspect its report, then run validation once with the same frozen policy and thresholds. Without an API key, classification returns a safe fallback and retrieval records unavailable evidence. If you choose to rebuild the KB index, set `OPENAI_API_KEY` in `.env` first and run the ingestion command in the section below; this makes external embedding API requests and may incur provider charges.
 
@@ -99,20 +99,20 @@ The development evaluation makes external OpenAI API requests and may incur prov
 Create the OpenAI-calibrated policy once:
 
 ```bash
-uv run --env-file .env cloudserve calibrate \
+uv run cloudserve calibrate \
   --development-input data/tickets/development_tickets.json
 ```
 
 Run the development command first and reconcile every input, result, decision, and SQLite audit record. Label comparisons remain visible diagnostics and do not require exact equality. The criteria-specific development tasks evaluate the blocking thresholds before validation; comparable-group metrics and their under-five-point target are reported but do not gate progression under PRD v2.6.
 
 ```bash
-uv run --env-file .env cloudserve run --input data/tickets/development_tickets.json --output-root outputs/development-evaluation --database outputs/development-evaluation.sqlite3 --label "development evaluation"
+uv run cloudserve run --input data/tickets/development_tickets.json --output-root outputs/development-evaluation --database outputs/development-evaluation.sqlite3 --label "development evaluation"
 ```
 
 Only after all blocking development criteria have passed, run validation once with the same default policy and credential configuration. The group-quality target remains reported but does not block this transition:
 
 ```bash
-uv run --env-file .env cloudserve run --input data/tickets/validation_tickets.json --output-root outputs/validation-evaluation --database outputs/validation-evaluation.sqlite3 --label "validation evaluation"
+uv run cloudserve run --input data/tickets/validation_tickets.json --output-root outputs/validation-evaluation --database outputs/validation-evaluation.sqlite3 --label "validation evaluation"
 ```
 
 The `.env.example` template intentionally leaves `OPENAI_API_KEY` empty. Without a key, classification returns a safe fallback and retrieval evidence is unavailable; this only checks the missing-credential path and cannot establish whether retrieval and citation-quality criteria pass. A configured key does not bypass packaged-index freshness checks: schema-3 validation compares the current canonical passage records with the packaged Chroma records before retrieval. The current packaged index passes the local retrieval check.
@@ -124,7 +124,7 @@ Each `run` writes mechanical post-processing metrics. These include per-class cl
 After a full development or validation run, use the separate post-run judge command. It selects exactly 20 distinct generated drafts reproducibly, sends only the ticket request, draft, cited eligible passages, and a matching reference response/rubric when available, then writes `quality_judgments.jsonl` and `evaluation.criteria.llm_judge` in `metrics.json`:
 
 ```bash
-uv run --env-file .env cloudserve evaluate-quality \
+uv run cloudserve evaluate-quality \
   --run-dir outputs/development-evaluation/<RUN_ID> \
   --input data/tickets/development_tickets.json \
   --ground-truth data/evaluation/ground_truth_responses.json
@@ -135,7 +135,7 @@ The judge uses `OPENAI_QUALITY_JUDGE_MODEL=gpt-6-luna`, independently of `OPENAI
 Run the development judge before the development criteria gate. Only after the final development criteria gate has passed, run validation once with the same frozen policy and credential configuration, then judge that completed validation run using its input path:
 
 ```bash
-uv run --env-file .env cloudserve evaluate-quality \
+uv run cloudserve evaluate-quality \
   --run-dir outputs/validation-evaluation/<RUN_ID> \
   --input data/tickets/validation_tickets.json \
   --ground-truth data/evaluation/ground_truth_responses.json
