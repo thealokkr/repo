@@ -184,14 +184,12 @@ def build_ticket_outcome(
             "message": classification.failure_reason
             or "Classification did not match the frozen policy model.",
         }
-        route = "degrade"
+        if not decision.protected_case:
+            route = "degrade"
+            reason = "Classification is unavailable; the ticket is available for human review."
     elif error is None and pre_provider_guardrail_block:
-        route = "escalate"
-        reason = (
-            "Ticket contains private data that must be reviewed by an agent."
-            if private_input_detected
-            else "Ticket contains an instruction override attempt and was held for human review."
-        )
+        route = decision.route
+        reason = decision.reason
 
     generation = {
         "provider": generator.name,
@@ -365,18 +363,16 @@ def build_ticket_outcome(
         )
     )
 
-    if route != decision.route:
+    if error and error["code"] in {"invalid_ticket_record", "duplicate_ticket_id"}:
+        routing_fields["matched_rule"] = "ticket_validation_failed"
+        routing_fields["protected_case"] = False
+    elif route != decision.route:
         if route == "degrade" and error and error["code"] == "classification_unavailable":
             routing_fields["matched_rule"] = "classification_unavailable_or_model_mismatch"
-        elif route == "degrade" and error and error["code"] in {
-            "invalid_ticket_record", "duplicate_ticket_id"
-        }:
-            routing_fields["matched_rule"] = "ticket_validation_failed"
         elif route == "degrade" and generation["status"] == "failed":
             routing_fields["matched_rule"] = "generation_unavailable"
         else:
             routing_fields["matched_rule"] = "generation_guardrail_blocked"
-        routing_fields["protected_case"] = route == "escalate"
         routing_fields["evidence_ready"] = bool(eligible_sources)
 
     handoff = (

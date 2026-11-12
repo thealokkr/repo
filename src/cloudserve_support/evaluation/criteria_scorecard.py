@@ -29,6 +29,9 @@ def build_criteria_scorecard(
     evaluation_labels_valid: bool = True,
 ) -> dict[str, Any]:
     """Return target-aware statuses with denominators and explicit exclusions."""
+    decision_events = [
+        event for event in decision_events if event.get("terminal", True) is True
+    ]
     latency = technical["latency"]["p95_seconds"]
     latency_status = _measured_status(latency)
     if latency.get("denominator") != len(results):

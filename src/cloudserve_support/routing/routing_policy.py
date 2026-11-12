@@ -51,6 +51,7 @@ def route_ticket_classification(
     *,
     evidence_ready: bool | None = None,
     ticket: CanonicalTicket | None = None,
+    pre_provider_guardrail_blocked: bool = False,
 ) -> RoutingDecision:
     """Route classification deterministically without consulting fixture labels."""
     if not isinstance(classification, dict):
@@ -139,6 +140,45 @@ def route_ticket_classification(
             "classification_signal_invalid",
             evidence_ready,
         )
+    operational_protected_intent = None
+    operational_request_unclear = False
+    if ticket is not None:
+        operational_text = operational_ticket_text(ticket)
+        operational_protected_intent = detect_protected_intent(operational_text)
+        operational_request_unclear = is_unclear_operational_request(operational_text)
+    protected_text_signal = bool(
+        operational_protected_intent or operational_request_unclear
+    )
+    if pre_provider_guardrail_blocked:
+        return RoutingDecision(
+            route="escalate",
+            reason="An input guardrail blocked external processing; human review is required.",
+            matched_rule="pre_provider_guardrail_blocked",
+            protected_case=protected_text_signal,
+            evidence_ready=evidence_ready,
+        )
+    if operational_protected_intent:
+        return RoutingDecision(
+            route="escalate",
+            reason=(
+                "Operational ticket text indicates a protected "
+                f"{operational_protected_intent.replace('_', ' ')} case."
+            ),
+            matched_rule=f"operational_protected_{operational_protected_intent}",
+            protected_case=True,
+            evidence_ready=evidence_ready,
+        )
+    if operational_request_unclear:
+        return RoutingDecision(
+            route="escalate",
+            reason=(
+                "Operational ticket text describes a symptom without naming the "
+                "affected feature; human review is required."
+            ),
+            matched_rule="operational_request_unclear",
+            protected_case=True,
+            evidence_ready=evidence_ready,
+        )
     model_matches_policy = (
         policy["classifier_provider"] == "openai"
         and policy["classifier_model"] == DECISIONS_CLASSIFIER_MODEL
@@ -153,34 +193,9 @@ def route_ticket_classification(
                 "manual review is required."
             ),
             matched_rule="classification_unavailable_or_model_mismatch",
-            protected_case=intent in PROTECTED_INTENTS,
+            protected_case=False,
             evidence_ready=evidence_ready,
         )
-    if ticket is not None:
-        operational_text = operational_ticket_text(ticket)
-        operational_protected_intent = detect_protected_intent(operational_text)
-        if operational_protected_intent:
-            return RoutingDecision(
-                route="escalate",
-                reason=(
-                    "Operational ticket text indicates a protected "
-                    f"{operational_protected_intent.replace('_', ' ')} case."
-                ),
-                matched_rule=f"operational_protected_{operational_protected_intent}",
-                protected_case=True,
-                evidence_ready=evidence_ready,
-            )
-        if is_unclear_operational_request(operational_text):
-            return RoutingDecision(
-                route="escalate",
-                reason=(
-                    "Operational ticket text describes a symptom without naming the "
-                    "affected feature; human review is required."
-                ),
-                matched_rule="operational_request_unclear",
-                protected_case=True,
-                evidence_ready=evidence_ready,
-            )
     if intent in PROTECTED_INTENTS:
         return RoutingDecision(
             route="escalate",

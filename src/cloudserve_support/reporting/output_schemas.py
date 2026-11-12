@@ -816,19 +816,32 @@ OUTPUT_SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": "object",
         "additionalProperties": False,
         "required": [
-            "event_id", "run_id", "input_index", "ticket_id", "occurred_at",
-            "event_type", "actor_type", "action_taken", "reason", "result",
+            "event_id", "run_id", "ticket_occurrence_id", "input_index", "ticket_id",
+            "occurred_at", "event_type", "actor_type", "terminal",
         ],
         "properties": {
             "event_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
             "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+            "ticket_occurrence_id": {"type": "string", "minLength": 1},
             "input_index": {"type": "integer", "minimum": 0},
             "ticket_id": {"type": "string", "minLength": 1},
             "occurred_at": {"type": "string", "format": "date-time"},
-            "event_type": {"enum": ["route_recommended", "processing_error"]},
+            "event_type": {"enum": ["classification", "retrieval", "routing", "generation", "ticket_completed", "ticket_failed"]},
             "actor_type": {"const": "system"},
+            "terminal": {"type": "boolean"},
             "action_taken": {"enum": ["draft_for_review", "escalate", "degrade"]},
             "reason": {"type": "string", "minLength": 1},
+            "stage_result": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["stage", "status", "value", "reason"],
+                "properties": {
+                    "stage": {"enum": ["classification", "retrieval", "routing", "generation"]},
+                    "status": {"type": "string", "minLength": 1},
+                    "value": {"type": "object"},
+                    "reason": {"type": "string", "minLength": 1},
+                },
+            },
             "result": {
                 "type": "object",
                 "required": [
@@ -839,6 +852,24 @@ OUTPUT_SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
                 ],
             },
         },
+        "oneOf": [
+            {
+                "properties": {
+                    "terminal": {"const": False},
+                    "event_type": {"enum": ["classification", "retrieval", "routing", "generation"]},
+                },
+                "required": ["stage_result"],
+                "not": {"anyOf": [{"required": ["action_taken"]}, {"required": ["result"]}]},
+            },
+            {
+                "properties": {
+                    "terminal": {"const": True},
+                    "event_type": {"enum": ["ticket_completed", "ticket_failed"]},
+                },
+                "required": ["action_taken", "reason", "result"],
+                "not": {"required": ["stage_result"]},
+            },
+        ],
     },
     "metrics.schema.json": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

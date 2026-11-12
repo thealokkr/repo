@@ -142,7 +142,9 @@ def _prepare_run_artifacts(
     )
     results = _read_jsonl(run_directory / "results.jsonl")
     decisions = _read_jsonl(run_directory / "decision_log.jsonl")
-    event_by_index = {row["input_index"]: row for row in decisions}
+    event_by_index = {
+        row["input_index"]: row for row in decisions if row.get("terminal") is True
+    }
     for result in results:
         event = event_by_index[result["input_index"]]
         event_time = datetime.fromisoformat(event["occurred_at"].replace("Z", "+00:00"))
@@ -230,7 +232,7 @@ def test_quality_judge_command_artifacts_preserve_results_and_decisions(
     assert metrics["evaluation"]["criteria"]["llm_judge"] == scorecard
     with sqlite3.connect(tmp_path / "runtime.sqlite3") as connection:
         audit_count = connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
-    assert audit_count == 20
+    assert audit_count == 100
 
 
 def test_quality_judge_marks_short_samples_incomplete_without_provider_calls(

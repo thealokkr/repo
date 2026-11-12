@@ -7,8 +7,7 @@ from typing import Any
 
 from cloudserve_support.classification.ticket_classification import INTENT_VALUES, URGENCY_VALUES
 from cloudserve_support.evaluation.run_metrics import (
-    INTENT_PRECISION_TARGET,
-    URGENCY_PRECISION_TARGET,
+    INTENT_ACCURACY_TARGET,
 )
 
 ROUTE_ALIASES = {"auto_respond": "draft_for_review", "escalate": "escalate"}
@@ -30,18 +29,12 @@ def build_terminal_summary(
         if isinstance(result.get("input_index"), int)
         and not isinstance(result.get("input_index"), bool)
     }
-    intent_support: Counter[str] = Counter()
-    intent_predicted: Counter[str] = Counter()
-    intent_correct: Counter[str] = Counter()
-    urgency_support: Counter[str] = Counter()
-    urgency_correct: Counter[str] = Counter()
-    urgency_predicted: Counter[str] = Counter()
+    intent_correct_count = 0
+    intent_sample_count = 0
+    urgency_correct_count = 0
+    urgency_sample_count = 0
     route_predicted: Counter[str] = Counter()
-    label_counts: dict[str, Counter[str]] = {
-        "intent": Counter(),
-        "urgency": Counter(),
-        "route": Counter(),
-    }
+    label_counts: dict[str, Counter[str]] = {"route": Counter()}
     label_matches: Counter[str] = Counter()
     label_totals: Counter[str] = Counter()
     answerability_labels: Counter[str] = Counter()
@@ -52,7 +45,6 @@ def build_terminal_summary(
     protected_escalated = 0
     protected_route_deviations = 0
     protected_auto_sends = 0
-    undefined_metrics: list[dict[str, str]] = []
 
     for input_index, record in enumerate(input_records):
         result = result_by_index.get(input_index)
@@ -67,8 +59,6 @@ def build_terminal_summary(
         if predicted_urgency not in URGENCY_VALUES:
             predicted_urgency = "unknown"
         predicted_route = _value(result.get("route"), "unknown")
-        intent_predicted[predicted_intent] += 1
-        urgency_predicted[predicted_urgency] += 1
         route_predicted[predicted_route] += 1
 
         labels = record.get("labels")
@@ -80,19 +70,13 @@ def build_terminal_summary(
         expected_route = ROUTE_ALIASES.get(expected_route_raw, expected_route_raw)
 
         if isinstance(expected_intent, str) and expected_intent in INTENT_VALUES:
-            intent_support[expected_intent] += 1
-            label_counts["intent"][expected_intent] += 1
-            label_totals["intent"] += 1
+            intent_sample_count += 1
             if predicted_intent == expected_intent:
-                label_matches["intent"] += 1
-                intent_correct[expected_intent] += 1
+                intent_correct_count += 1
         if isinstance(expected_urgency, str) and expected_urgency in URGENCY_VALUES:
-            urgency_support[expected_urgency] += 1
-            label_counts["urgency"][expected_urgency] += 1
-            label_totals["urgency"] += 1
+            urgency_sample_count += 1
             if predicted_urgency == expected_urgency:
-                label_matches["urgency"] += 1
-                urgency_correct[expected_urgency] += 1
+                urgency_correct_count += 1
         if isinstance(expected_route_raw, str) and expected_route_raw in EXPECTED_ROUTE_LABEL_VALUES:
             label_counts["route"][expected_route] += 1
             label_totals["route"] += 1
@@ -144,105 +128,60 @@ def build_terminal_summary(
         if isinstance(governance_metrics, dict)
         else None
     )
-    intent_rows: dict[str, dict[str, Any]] = {}
-    if (
-        isinstance(classification_scorecard, dict)
-        and isinstance(classification_scorecard.get("per_class"), dict)
-    ):
-        for intent, row in classification_scorecard["per_class"].items():
-            precision_metric = row.get("precision", {})
-            recall_metric = row.get("recall", {})
-            correct_count = precision_metric.get("numerator") or 0
-            intent_rows[intent] = {
-                "support": row.get("support", 0),
-                "predicted_count": row.get("predicted_count", 0),
-                "correct_count": correct_count,
-                "label_match_count": correct_count,
-                "precision": precision_metric.get("value"),
-                "recall": recall_metric.get("value"),
-                "precision_target_status": row.get("precision_target_status", "not_applicable"),
-            }
-            if precision_metric.get("status") != "available":
-                undefined_metrics.append({"intent": intent, "metric": "precision"})
-            if recall_metric.get("status") != "available":
-                undefined_metrics.append({"intent": intent, "metric": "recall"})
-        intent_target_status = classification_scorecard.get(
-            "precision_target_status", "not_applicable"
-        )
-        supported_class_count = classification_scorecard.get(
-            "precision_classes_with_support", 0
-        )
-        intent_target_met_count = classification_scorecard.get(
-            "precision_classes_meeting_target", 0
-        )
-    else:
-        predicted_classes = set(intent_predicted) & INTENT_VALUES
-        if intent_predicted["unknown"]:
-            predicted_classes.add("unknown")
-        all_intents = sorted(set(intent_support) | predicted_classes)
-        for intent in all_intents:
-            support = intent_support[intent]
-            predicted = intent_predicted[intent]
-            correct = intent_correct[intent]
-            precision = correct / predicted if predicted and support else None
-            recall = correct / support if support else None
-            precision_target_status = (
-                "not_applicable"
-                if not support or not predicted
-                else "met"
-                if precision is not None and precision >= INTENT_PRECISION_TARGET
-                else "below_target"
-            )
-            intent_rows[intent] = {
-                "support": support,
-                "predicted_count": predicted,
-                "correct_count": correct,
-                "label_match_count": correct,
-                "precision": precision,
-                "recall": recall,
-                "precision_target_status": precision_target_status,
-            }
-            if not support or not predicted:
-                undefined_metrics.append({"intent": intent, "metric": "precision"})
-            if recall is None:
-                undefined_metrics.append({"intent": intent, "metric": "recall"})
-        supported_intent_rows = [row for row in intent_rows.values() if row["support"] > 0]
-        intent_target_met_count = sum(
-            row["precision_target_status"] == "met" for row in supported_intent_rows
-        )
-        supported_class_count = len(supported_intent_rows)
-        intent_target_status = (
-            "pass"
-            if supported_intent_rows and intent_target_met_count == len(supported_intent_rows)
-            else "below_target"
-            if supported_intent_rows
-            else "not_applicable"
-        )
+    accuracy_metric = (
+        classification_scorecard.get("accuracy")
+        if isinstance(classification_scorecard, dict)
+        and isinstance(classification_scorecard.get("accuracy"), dict)
+        else {}
+    )
+    accuracy_value = accuracy_metric.get("value")
+    if not isinstance(accuracy_value, (int, float)) or isinstance(accuracy_value, bool):
+        accuracy_value = intent_correct_count / intent_sample_count if intent_sample_count else None
+    reported_correct_count = accuracy_metric.get("numerator")
+    if not isinstance(reported_correct_count, int) or isinstance(reported_correct_count, bool):
+        reported_correct_count = intent_correct_count
+    reported_sample_count = accuracy_metric.get("denominator")
+    if not isinstance(reported_sample_count, int) or isinstance(reported_sample_count, bool):
+        reported_sample_count = intent_sample_count
+    classification_target_status = (
+        "invalid_evaluation_data"
+        if isinstance(classification_scorecard, dict)
+        and classification_scorecard.get("precision_target_status") == "invalid_evaluation_data"
+        else "not_applicable"
+        if not reported_sample_count or accuracy_value is None
+        else "met"
+        if accuracy_value >= INTENT_ACCURACY_TARGET
+        else "below_target"
+    )
     urgency_scorecard = technical_metrics.get("urgency") if isinstance(technical_metrics, dict) else None
     urgency_match_metric = (
         urgency_scorecard.get("exact_match_rate")
         if isinstance(urgency_scorecard, dict)
         else None
     )
-    urgency_match_count = (
-        urgency_match_metric.get("numerator")
-        if isinstance(urgency_match_metric, dict)
-        else label_matches["urgency"]
-    )
-    urgency_sample_count = (
-        urgency_match_metric.get("denominator")
-        if isinstance(urgency_match_metric, dict)
-        else label_totals["urgency"]
-    )
-    urgency_match_rate = (
+    urgency_accuracy_value = (
         urgency_match_metric.get("value")
         if isinstance(urgency_match_metric, dict)
-        else (
-            label_matches["urgency"] / label_totals["urgency"]
-            if label_totals["urgency"]
-            else None
-        )
+        else None
     )
+    if not isinstance(urgency_accuracy_value, (int, float)) or isinstance(urgency_accuracy_value, bool):
+        urgency_accuracy_value = (
+            urgency_correct_count / urgency_sample_count if urgency_sample_count else None
+        )
+    reported_urgency_correct_count = (
+        urgency_match_metric.get("numerator")
+        if isinstance(urgency_match_metric, dict)
+        else urgency_correct_count
+    )
+    if not isinstance(reported_urgency_correct_count, int) or isinstance(reported_urgency_correct_count, bool):
+        reported_urgency_correct_count = urgency_correct_count
+    reported_urgency_sample_count = (
+        urgency_match_metric.get("denominator")
+        if isinstance(urgency_match_metric, dict)
+        else urgency_sample_count
+    )
+    if not isinstance(reported_urgency_sample_count, int) or isinstance(reported_urgency_sample_count, bool):
+        reported_urgency_sample_count = urgency_sample_count
 
     routes_from_metrics = metrics.get("route_counts")
     if isinstance(routes_from_metrics, dict):
@@ -255,7 +194,7 @@ def build_terminal_summary(
             "denominator": label_totals[field],
             "label_counts": dict(sorted(label_counts[field].items())),
         }
-        for field in ("intent", "urgency", "route")
+        for field in ("route",)
     }
     return {
         "input_count": metrics.get("total_count", len(input_records)),
@@ -266,68 +205,26 @@ def build_terminal_summary(
         "result_count": len(results),
         "latency": _latency_summary(metrics),
         "predicted_counts": {
-            "intent": dict(sorted(intent_predicted.items())),
-            "urgency": dict(sorted(urgency_predicted.items())),
             "route": dict(sorted(route_predicted.items())),
         },
-        "intent_quality": intent_rows,
-        "intent_precision_target": {
-            "threshold": INTENT_PRECISION_TARGET,
-            "status": intent_target_status,
-            "supported_class_count": supported_class_count,
-            "meeting_class_count": intent_target_met_count,
-            "note": "Development-set criterion; unsupported or unpredicted classes are not applicable and do not count as meeting the target.",
+        "classification_accuracy": {
+            "correct_count": reported_correct_count,
+            "sample_count": reported_sample_count,
+            "percentage": (
+                round(float(accuracy_value) * 100, 1)
+                if accuracy_value is not None
+                else None
+            ),
+            "target_percentage": INTENT_ACCURACY_TARGET * 100,
+            "status": classification_target_status,
         },
-        "urgency_quality": {
-            "precision_target": URGENCY_PRECISION_TARGET,
-            "target_status": _urgency_target_status(
-                urgency_scorecard,
-                urgency_support=urgency_support,
-                urgency_predicted=urgency_predicted,
-                urgency_correct=urgency_correct,
-            ),
-            "exact_match_count": urgency_match_count,
-            "sample_count": urgency_sample_count,
-            "exact_match_rate": urgency_match_rate,
-            "per_class": _urgency_class_summary(
-                urgency_scorecard,
-                urgency_support=urgency_support,
-                urgency_predicted=urgency_predicted,
-                urgency_correct=urgency_correct,
-            ),
-            "supported_class_count": (
-                urgency_scorecard.get("precision_classes_with_support")
-                if isinstance(urgency_scorecard, dict)
-                else sum(support > 0 for support in urgency_support.values())
-            ),
-            "meeting_class_count": (
-                urgency_scorecard.get("precision_classes_meeting_target")
-                if isinstance(urgency_scorecard, dict)
-                else sum(
-                    row["precision_target_status"] == "met"
-                    for row in _urgency_class_summary(
-                        None,
-                        urgency_support=urgency_support,
-                        urgency_predicted=urgency_predicted,
-                        urgency_correct=urgency_correct,
-                    ).values()
-                    if row["support"] > 0
-                )
-            ),
-            "confusion_matrix": (
-                urgency_scorecard.get("confusion_matrix")
-                if isinstance(urgency_scorecard, dict)
+        "urgency_accuracy": {
+            "correct_count": reported_urgency_correct_count,
+            "sample_count": reported_urgency_sample_count,
+            "percentage": (
+                round(float(urgency_accuracy_value) * 100, 1)
+                if urgency_accuracy_value is not None
                 else None
-            ),
-            "prioritization_error_counts": (
-                urgency_scorecard.get("prioritization_error_counts")
-                if isinstance(urgency_scorecard, dict)
-                else None
-            ),
-            "prioritization_errors": (
-                urgency_scorecard.get("prioritization_errors")
-                if isinstance(urgency_scorecard, dict)
-                else []
             ),
         },
         "label_match_counts": comparison,
@@ -345,90 +242,11 @@ def build_terminal_summary(
             "route_deviation_count": protected_route_deviations,
             "automatic_send_count": protected_auto_sends,
         },
-        "undefined_metrics": undefined_metrics,
         "artifact_notes": {
-            "confusion_matrix": "metrics.json evaluation classification confusion_matrix",
-            "urgency_confusion_matrix": "metrics.json evaluation run_observed technical urgency confusion_matrix",
             "ticket_level_mismatches": "label_comparison.json after the post-run comparator is executed",
         },
         "evaluation_labels_read_after_persistence": True,
     }
-
-
-def _urgency_class_summary(
-    scorecard: dict[str, Any] | None,
-    *,
-    urgency_support: Counter[str],
-    urgency_predicted: Counter[str],
-    urgency_correct: Counter[str],
-) -> dict[str, dict[str, Any]]:
-    """Return urgency precision/recall and the project-set per-class target status."""
-    if isinstance(scorecard, dict) and isinstance(scorecard.get("per_class"), dict):
-        return {
-            urgency: {
-                "support": row.get("support", 0),
-                "predicted_count": row.get("predicted_count", 0),
-                "correct_count": row.get("precision", {}).get("numerator", 0),
-                "precision": row.get("precision", {}).get("value"),
-                "recall": row.get("recall", {}).get("value"),
-                "precision_target_status": row.get(
-                    "precision_target_status", "not_applicable"
-                ),
-            }
-            for urgency, row in scorecard["per_class"].items()
-            if isinstance(row, dict)
-        }
-
-    classes = sorted(set(urgency_support) | set(urgency_predicted))
-    summary: dict[str, dict[str, Any]] = {}
-    for urgency in classes:
-        support = urgency_support[urgency]
-        predicted = urgency_predicted[urgency]
-        correct = urgency_correct[urgency]
-        precision = correct / predicted if predicted else None
-        recall = correct / support if support else None
-        target_status = (
-            "not_applicable"
-            if not support or not predicted
-            else "met"
-            if precision is not None and precision >= URGENCY_PRECISION_TARGET
-            else "below_target"
-        )
-        summary[urgency] = {
-            "support": support,
-            "predicted_count": predicted,
-            "correct_count": correct,
-            "precision": precision,
-            "recall": recall,
-            "precision_target_status": target_status,
-        }
-    return summary
-
-
-def _urgency_target_status(
-    scorecard: dict[str, Any] | None,
-    *,
-    urgency_support: Counter[str],
-    urgency_predicted: Counter[str],
-    urgency_correct: Counter[str],
-) -> str:
-    """Summarize whether every supported urgency class met the precision target."""
-    if isinstance(scorecard, dict):
-        return scorecard.get("target_status", "not_applicable")
-    per_class = _urgency_class_summary(
-        None,
-        urgency_support=urgency_support,
-        urgency_predicted=urgency_predicted,
-        urgency_correct=urgency_correct,
-    )
-    supported_classes = [row for row in per_class.values() if row["support"] > 0]
-    if not supported_classes:
-        return "not_applicable"
-    return (
-        "pass"
-        if all(row["precision_target_status"] == "met" for row in supported_classes)
-        else "below_target"
-    )
 
 
 def _latency_summary(metrics: dict[str, Any]) -> dict[str, Any]:

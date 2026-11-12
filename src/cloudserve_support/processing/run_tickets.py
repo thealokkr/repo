@@ -6,7 +6,7 @@ import json
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -32,12 +32,20 @@ from cloudserve_support.guardrails.draft_safety import (
 )
 from cloudserve_support.ingestion.ticket_input import read_ticket_records
 from cloudserve_support.ingestion.ticket_normalization import normalize_ticket_record
-from cloudserve_support.knowledge.retrieval import KnowledgeRetriever, RetrievalResult
+from cloudserve_support.knowledge.retrieval import (
+    DEFAULT_EMBEDDING_BATCH_SIZE,
+    DEFAULT_QUERY_BATCH_SIZE,
+    MINIMUM_SIMILARITY,
+    KnowledgeRetriever,
+    RetrievalResult,
+)
 from cloudserve_support.persistence.runtime_database import (
     connect_runtime_database,
     create_processing_run,
-    create_ticket_audit_records,
-    update_ticket_audit_result_payload,
+    create_audit_event_record,
+    create_ticket_run_record,
+    update_terminal_audit_event_payload,
+    update_ticket_run_status,
     update_processing_run_status,
 )
 from cloudserve_support.reporting.output_schemas import load_output_schemas
@@ -53,7 +61,10 @@ from cloudserve_support.routing.policy_calibration import (
     load_frozen_routing_policy,
 )
 from cloudserve_support.processing.ticket_outcomes import build_ticket_outcome
-from cloudserve_support.routing.routing_policy import route_ticket_classification
+from cloudserve_support.routing.routing_policy import (
+    RoutingDecision,
+    route_ticket_classification,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -64,7 +75,7 @@ DEFAULT_ROUTING_POLICY_CONFIG_PATH = REPO_ROOT / "conf" / "frozen_routing_policy
 
 @dataclass
 class _PreparedTicket:
-    """Hold normalized and safety-checked ticket state before batch classification."""
+    """Carry each input position's typed outcomes across pipeline phases."""
 
     input_index: int
     ticket: CanonicalTicket
@@ -73,6 +84,8 @@ class _PreparedTicket:
     duplicate_ticket_id: bool
     pre_provider_guardrail_block: bool
     classification: TicketClassification | None
+    retrieval: RetrievalResult | None = None
+    decision: RoutingDecision | None = None
     classification_request_duration_seconds: float = 0.0
 
 
@@ -128,6 +141,20 @@ def run_ticket_batch(
         connection.commit()
         run_record_committed = True
         prepared_tickets = _prepare_ticket_records(input_records)
+        connection.execute("BEGIN IMMEDIATE")
+        for prepared_ticket in prepared_tickets:
+            ticket = prepared_ticket.ticket
+            create_ticket_run_record(
+                connection,
+                run_id=run_id,
+                storage_ticket_id=prepared_ticket.storage_ticket_id,
+                channel=ticket.channel,
+                received_at=ticket.received_at,
+                customer_tier=ticket.customer_tier,
+                language_fluency=ticket.language_fluency,
+                context=ticket.context,
+            )
+        connection.commit()
         classifiable_tickets = [
             prepared_ticket
             for prepared_ticket in prepared_tickets
@@ -151,6 +178,90 @@ def run_ticket_batch(
                     )
 
         for prepared_ticket in prepared_tickets:
+            classification = prepared_ticket.classification
+            if classification is None:
+                classification = classification_failure(
+                    provider="not_attempted",
+                    model_name=DECISIONS_CLASSIFIER_MODEL,
+                    uncertainty="Ticket was not included in a Decisions classification batch.",
+                )
+                prepared_ticket.classification = classification
+            _persist_stage_checkpoint(
+                connection,
+                run_id=run_id,
+                prepared_ticket=prepared_ticket,
+                stage="classification",
+                status=classification.provider_status,
+                value=classification.as_dict(),
+                reason=(
+                    classification.failure_reason
+                    or (
+                        "Classification was not attempted because input validation or a pre-provider guardrail blocked it."
+                        if classification.provider == "not_attempted"
+                        else "Ticket classification completed."
+                    )
+                ),
+                model_name=classification.model_name,
+                prediction=classification.as_dict(),
+            )
+
+        retrieval_results = _retrieve_ticket_results(
+            prepared_tickets,
+            retriever=knowledge_retriever,
+            settings=settings,
+        )
+        for prepared_ticket, retrieval in zip(prepared_tickets, retrieval_results, strict=True):
+            prepared_ticket.retrieval = retrieval
+            _persist_stage_checkpoint(
+                connection,
+                run_id=run_id,
+                prepared_ticket=prepared_ticket,
+                stage="retrieval",
+                status=retrieval.status,
+                value={
+                    **retrieval.as_dict(),
+                    "passages": [
+                        {
+                            "passage_id": source.get("passage_id"),
+                            "similarity": source.get("similarity"),
+                        }
+                        for source in retrieval.sources
+                    ],
+                },
+                reason=retrieval.reason,
+            )
+
+        for prepared_ticket in prepared_tickets:
+            classification = prepared_ticket.classification
+            if classification is None:
+                classification = classification_failure(
+                    provider="not_attempted",
+                    model_name=DECISIONS_CLASSIFIER_MODEL,
+                    uncertainty="Ticket was not included in a Decisions classification batch.",
+                )
+                prepared_ticket.classification = classification
+            retrieval = prepared_ticket.retrieval
+            if retrieval is None:
+                raise RuntimeError("Ticket retrieval phase did not resolve every input position.")
+            prepared_ticket.decision = route_ticket_classification(
+                classification.as_dict(),
+                policy,
+                evidence_ready=retrieval.evidence_ready,
+                ticket=prepared_ticket.ticket,
+                pre_provider_guardrail_blocked=prepared_ticket.pre_provider_guardrail_block,
+            )
+            decision = prepared_ticket.decision
+            _persist_stage_checkpoint(
+                connection,
+                run_id=run_id,
+                prepared_ticket=prepared_ticket,
+                stage="routing",
+                status="decided",
+                value=asdict(decision),
+                reason=decision.reason,
+            )
+
+        for prepared_ticket in prepared_tickets:
             ticket_started = time.perf_counter()
             result, storage_ticket_id, ticket = _build_ticket_result(
                 prepared_ticket,
@@ -159,41 +270,71 @@ def run_ticket_batch(
                 policy=policy,
                 policy_file_fingerprint=policy_file_fingerprint,
                 classifier_implementation_fingerprint=classifier_implementation_fingerprint,
-                retriever=knowledge_retriever,
                 generator=draft_generator,
             )
             occurred_at = _utc_timestamp()
             connection.execute("BEGIN IMMEDIATE")
-            create_ticket_audit_records(
+            generation = result["generation"]
+            _insert_audit_event(
                 connection,
                 run_id=run_id,
                 storage_ticket_id=storage_ticket_id,
-                channel=ticket.channel,
-                received_at=ticket.received_at,
-                customer_tier=ticket.customer_tier,
-                language_fluency=ticket.language_fluency,
-                context=ticket.context,
-                processing_status=result["status"],
-                error_code=result.get("error", {}).get("code"),
-                error_message=result.get("error", {}).get("message"),
                 event_id=uuid.uuid4().hex,
                 occurred_at=occurred_at,
-                event_type=(
-                    "processing_error" if result["status"] == "failed" else "route_recommended"
-                ),
-                input_summary=ticket.body,
-                action_taken=result["route"],
-                reason=result["reason"],
-                result_payload=result,
-                model_name=result["classification"]["model_name"],
-                model_version=None,
+                event_type="generation",
+                result_payload={
+                    "input_index": prepared_ticket.input_index,
+                    "ticket_id": ticket.ticket_id,
+                    "stage": "generation",
+                    "status": generation["status"],
+                    "value": {
+                        **generation,
+                        "draft_present": result.get("draft") is not None,
+                    },
+                    "reason": (
+                        result.get("error", {}).get("message")
+                        or "Draft generation completed or was safely skipped."
+                    ),
+                },
+                model_name=generation.get("model_name"),
                 prompt_version=GENERATION_PROMPT_VERSION,
+                reason=(
+                    result.get("error", {}).get("message")
+                    or "Draft generation completed or was safely skipped."
+                ),
+            )
+            connection.commit()
+
+            connection.execute("BEGIN IMMEDIATE")
+            error = result.get("error", {})
+            terminal_event_type = (
+                "ticket_failed" if result["status"] == "failed" else "ticket_completed"
+            )
+            terminal_event_id = uuid.uuid4().hex
+            terminal_payload = {
+                "input_index": prepared_ticket.input_index,
+                "ticket_id": ticket.ticket_id,
+                "result": result,
+            }
+            _insert_audit_event(
+                connection,
+                run_id=run_id,
+                storage_ticket_id=storage_ticket_id,
+                event_id=terminal_event_id,
+                occurred_at=_utc_timestamp(),
+                event_type=terminal_event_type,
+                result_payload=terminal_payload,
+                input_summary=ticket.body,
+                model_name=result["classification"]["model_name"],
+                prompt_version=GENERATION_PROMPT_VERSION,
+                prediction=result["classification"],
                 requirement_ids=[
                     "A3", "A4", "A5", "A6", "A7", "A11", "FR-01", "FR-02",
                     "FR-03", "FR-04", "FR-05", "FR-06", "FR-07", "FR-08", "FR-11",
                 ],
-                prediction=result["classification"],
                 threshold_applied=result["routing"]["confidence_threshold"],
+                action_taken=result["route"],
+                reason=result["reason"],
                 guardrail_results={
                     "protected_case": result["routing"]["protected_case"],
                     "matched_policy_rule": result["routing"]["matched_rule"],
@@ -201,6 +342,15 @@ def run_ticket_batch(
                     "retrieval": result["routing"]["retrieval"],
                     "checks": result["guardrails"]["checks"],
                 },
+                sources=result["sources"],
+            )
+            update_ticket_run_status(
+                connection,
+                run_id=run_id,
+                storage_ticket_id=storage_ticket_id,
+                processing_status=result["status"],
+                error_code=error.get("code"),
+                error_message=error.get("message"),
             )
             _commit_ticket_records(connection)
             result["processing_duration_seconds"] = max(
@@ -217,11 +367,10 @@ def run_ticket_batch(
                 0.0,
             )
             connection.execute("BEGIN IMMEDIATE")
-            update_ticket_audit_result_payload(
+            update_terminal_audit_event_payload(
                 connection,
-                run_id=run_id,
-                storage_ticket_id=storage_ticket_id,
-                result_payload=result,
+                event_id=terminal_event_id,
+                result_payload=terminal_payload,
             )
             connection.commit()
 
@@ -271,6 +420,88 @@ def _commit_ticket_records(connection: sqlite3.Connection) -> None:
     connection.commit()
 
 
+def _persist_stage_checkpoint(
+    connection: sqlite3.Connection,
+    *,
+    run_id: str,
+    prepared_ticket: _PreparedTicket,
+    stage: str,
+    status: str,
+    value: dict[str, Any],
+    reason: str,
+    model_name: str | None = None,
+    prediction: dict[str, Any] | None = None,
+) -> None:
+    """Commit a source-safe typed result before the next pipeline stage begins."""
+    ticket = prepared_ticket.ticket
+    connection.execute("BEGIN IMMEDIATE")
+    _insert_audit_event(
+        connection,
+        run_id=run_id,
+        storage_ticket_id=prepared_ticket.storage_ticket_id,
+        event_id=uuid.uuid4().hex,
+        occurred_at=_utc_timestamp(),
+        event_type=stage,
+        result_payload={
+            "input_index": prepared_ticket.input_index,
+            "ticket_id": ticket.ticket_id,
+            "stage": stage,
+            "status": status,
+            "value": value,
+            "reason": reason,
+        },
+        input_summary=ticket.body if stage == "classification" else None,
+        model_name=model_name,
+        prediction=prediction,
+        reason=reason,
+    )
+    connection.commit()
+
+
+def _insert_audit_event(
+    connection: sqlite3.Connection,
+    *,
+    run_id: str,
+    storage_ticket_id: str,
+    event_id: str,
+    occurred_at: str,
+    event_type: str,
+    result_payload: dict[str, Any],
+    input_summary: str | None = None,
+    model_name: str | None = None,
+    prompt_version: str | None = None,
+    prediction: dict[str, Any] | None = None,
+    requirement_ids: list[str] | None = None,
+    alternatives: list[dict[str, Any]] | None = None,
+    threshold_applied: float | None = None,
+    action_taken: str | None = None,
+    reason: str | None = None,
+    guardrail_results: dict[str, Any] | None = None,
+    sources: list[dict[str, Any]] | None = None,
+) -> None:
+    """Insert one audit row through the database's typed persistence boundary."""
+    create_audit_event_record(
+        connection,
+        event_id=event_id,
+        run_id=run_id,
+        storage_ticket_id=storage_ticket_id,
+        occurred_at=occurred_at,
+        event_type=event_type,
+        result_payload=result_payload,
+        input_summary=input_summary,
+        model_name=model_name,
+        prompt_version=prompt_version,
+        prediction=prediction,
+        requirement_ids=requirement_ids,
+        alternatives=alternatives,
+        threshold_applied=threshold_applied,
+        action_taken=action_taken,
+        reason=reason,
+        guardrail_results=guardrail_results,
+        sources=sources,
+    )
+
+
 def _build_ticket_result(
     prepared_ticket: _PreparedTicket,
     *,
@@ -279,16 +510,14 @@ def _build_ticket_result(
     policy: dict[str, Any],
     policy_file_fingerprint: str,
     classifier_implementation_fingerprint: str,
-    retriever: KnowledgeRetriever,
     generator: DraftGenerationProvider,
 ) -> tuple[dict[str, Any], str, CanonicalTicket]:
-    """Retrieve, route, draft or hand off, and produce one final ticket outcome."""
+    """Compose one terminal outcome from its completed per-ticket pipeline phases."""
     ticket = prepared_ticket.ticket
     input_index = prepared_ticket.input_index
     storage_ticket_id = prepared_ticket.storage_ticket_id
     issues = prepared_ticket.issues
     duplicate = prepared_ticket.duplicate_ticket_id
-    pre_provider_guardrail_block = prepared_ticket.pre_provider_guardrail_block
     classification = prepared_ticket.classification
     if classification is None:
         classification = classification_failure(
@@ -296,34 +525,10 @@ def _build_ticket_result(
             model_name=DECISIONS_CLASSIFIER_MODEL,
             uncertainty="Ticket was not included in a Decisions classification batch.",
         )
-    retrieval = (
-        retriever.retrieve(ticket)
-        if not issues and not pre_provider_guardrail_block
-        else RetrievalResult(
-            status="skipped",
-            reason_code=(
-                "invalid_ticket_record" if issues else "pre_provider_guardrail_block"
-            ),
-            reason=(
-                "Retrieval was skipped because the ticket record is invalid."
-                if issues
-                else "Retrieval was skipped because an input guardrail blocked external processing."
-            ),
-            sources=(),
-            eligible_candidate_count=0,
-            excluded_candidate_counts={},
-            minimum_similarity=0.45,
-            embedding_model=settings.embedding_model,
-            source_sha256=None,
-            metadata_manifest_sha256=None,
-        )
-    )
-    decision = route_ticket_classification(
-        classification.as_dict(),
-        policy,
-        evidence_ready=retrieval.evidence_ready,
-        ticket=ticket,
-    )
+    retrieval = prepared_ticket.retrieval
+    decision = prepared_ticket.decision
+    if retrieval is None or decision is None:
+        raise RuntimeError("Ticket outcome requires completed retrieval and routing phases.")
     result = build_ticket_outcome(
         run_id=run_id,
         input_index=input_index,
@@ -340,6 +545,125 @@ def _build_ticket_result(
         duplicate_ticket_id=duplicate,
     )
     return result, storage_ticket_id, ticket
+
+
+def _retrieve_ticket_result(
+    prepared_ticket: _PreparedTicket,
+    *,
+    retriever: KnowledgeRetriever,
+    settings: Settings,
+) -> RetrievalResult:
+    """Resolve one retrieval outcome, including explicit skips and provider failures."""
+    if prepared_ticket.issues or prepared_ticket.pre_provider_guardrail_block:
+        return _skipped_retrieval_result(prepared_ticket, settings)
+    try:
+        return retriever.retrieve(prepared_ticket.ticket)
+    except Exception:
+        return RetrievalResult(
+            status="unavailable",
+            reason_code="retrieval_provider_or_index_error",
+            reason="Knowledge retrieval failed; no source was used.",
+            sources=(),
+            eligible_candidate_count=0,
+            excluded_candidate_counts={},
+            minimum_similarity=MINIMUM_SIMILARITY,
+            embedding_model=settings.embedding_model,
+            source_sha256=getattr(retriever, "source_sha256", None),
+            metadata_manifest_sha256=getattr(
+                retriever, "metadata_manifest_sha256", None
+            ),
+        )
+
+
+def _retrieve_ticket_results(
+    prepared_tickets: list[_PreparedTicket],
+    *,
+    retriever: KnowledgeRetriever,
+    settings: Settings,
+) -> tuple[RetrievalResult, ...]:
+    """Resolve every retrieval outcome in input order before any routing begins."""
+    results: list[RetrievalResult | None] = [None] * len(prepared_tickets)
+    eligible_positions: list[int] = []
+    for position, prepared_ticket in enumerate(prepared_tickets):
+        if prepared_ticket.issues or prepared_ticket.pre_provider_guardrail_block:
+            results[position] = _skipped_retrieval_result(prepared_ticket, settings)
+        else:
+            eligible_positions.append(position)
+
+    if eligible_positions:
+        # Legacy injected test retrievers remain serial; the production class uses bulk retrieval.
+        retrieve_many = getattr(type(retriever), "retrieve_many", None)
+        if retrieve_many is not None:
+            try:
+                batch_results = retriever.retrieve_many(
+                    [prepared_tickets[position].ticket for position in eligible_positions],
+                    embedding_batch_size=DEFAULT_EMBEDDING_BATCH_SIZE,
+                    query_batch_size=DEFAULT_QUERY_BATCH_SIZE,
+                )
+                if len(batch_results) != len(eligible_positions):
+                    raise ValueError("Bulk retrieval result count does not match ticket count.")
+                for position, retrieval in zip(
+                    eligible_positions, batch_results, strict=True
+                ):
+                    results[position] = retrieval
+            except Exception:
+                for position in eligible_positions:
+                    results[position] = _unavailable_retrieval_result(retriever, settings)
+        else:
+            for position in eligible_positions:
+                results[position] = _retrieve_ticket_result(
+                    prepared_tickets[position], retriever=retriever, settings=settings
+                )
+
+    if any(result is None for result in results):
+        raise RuntimeError("Retrieval phase did not resolve every input position.")
+    return tuple(result for result in results if result is not None)
+
+
+def _skipped_retrieval_result(
+    prepared_ticket: _PreparedTicket,
+    settings: Settings,
+) -> RetrievalResult:
+    """Build a no-provider retrieval result for an invalid or blocked ticket."""
+    return RetrievalResult(
+        status="skipped",
+        reason_code=(
+            "invalid_ticket_record"
+            if prepared_ticket.issues
+            else "pre_provider_guardrail_block"
+        ),
+        reason=(
+            "Retrieval was skipped because the ticket record is invalid."
+            if prepared_ticket.issues
+            else "Retrieval was skipped because an input guardrail blocked external processing."
+        ),
+        sources=(),
+        eligible_candidate_count=0,
+        excluded_candidate_counts={},
+        minimum_similarity=MINIMUM_SIMILARITY,
+        embedding_model=settings.embedding_model,
+        source_sha256=None,
+        metadata_manifest_sha256=None,
+    )
+
+
+def _unavailable_retrieval_result(
+    retriever: KnowledgeRetriever,
+    settings: Settings,
+) -> RetrievalResult:
+    """Build a safe unavailable result when the bulk retrieval boundary raises."""
+    return RetrievalResult(
+        status="unavailable",
+        reason_code="retrieval_provider_or_index_error",
+        reason="Knowledge retrieval failed; no source was used.",
+        sources=(),
+        eligible_candidate_count=0,
+        excluded_candidate_counts={},
+        minimum_similarity=MINIMUM_SIMILARITY,
+        embedding_model=settings.embedding_model,
+        source_sha256=getattr(retriever, "source_sha256", None),
+        metadata_manifest_sha256=getattr(retriever, "metadata_manifest_sha256", None),
+    )
 
 
 def _prepare_ticket_records(input_records: list[Any]) -> list[_PreparedTicket]:

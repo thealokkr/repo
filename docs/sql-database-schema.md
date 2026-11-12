@@ -88,9 +88,11 @@ For a batch containing tickets `T-104` and `T-105`:
 
 1. Insert one `processing_runs` row for the batch.
 2. Insert one `ticket_runs` row for each ticket using the same `run_id`.
-3. Append `audit_events` rows as each ticket is classified, searched, drafted, validated, or sent for agent review. A source-grounded decision stores the cited passage snapshot in `sources_json`.
-4. Update each ticket's `processing_status`, and update the run's final status and completion time.
-5. Generate a human-readable or machine-readable export under `outputs/` from the persisted run, ticket, and event records.
+3. Commit one `classification` event per occurrence after the full classification phase resolves.
+4. Resolve and commit one `retrieval` event per occurrence. Retrieval event payloads record status and passage IDs/scores, but no passage text. The full batch retrieval phase is persisted before the first routing event.
+5. Commit one `routing` event per occurrence, then a `generation` event after drafting or a safe skip resolves. Every stage event stores `{input_index, ticket_id, stage, status, value, reason}` in `result_payload_json`.
+6. Append one terminal `ticket_completed` or `ticket_failed` event with the complete result and eligible source snapshots, and update the ticket's status in the same transaction.
+7. Generate a human-readable or machine-readable export under `outputs/` from persisted events. `results.jsonl` contains exactly one terminal result per input occurrence; `decision_log.jsonl` contains every stage and terminal event in chronological order.
 
 If `T-104` is submitted again later, it gets a new `ticket_runs` row because its `run_id` differs. Its history from earlier runs remains queryable under the previous run.
 
@@ -104,8 +106,8 @@ If `T-104` is submitted again later, it gets a new `ticket_runs` row because its
 
 The schema is intentionally limited to runtime execution and audit needs. Evaluation ground-truth labels remain in `data/evaluation/` and must not enter the ticket-processing path.
 
-The runtime audit reader returns a run's events ordered by `occurred_at`, with `event_id` as a stable tie-breaker. Each ticket's final event preserves the recommended route and reason, eligible source snapshots, guardrail results, and the complete result payload so a reviewer can replay the decision evidence from SQLite.
+The runtime audit reader returns a run's events ordered by `occurred_at` and SQLite insertion order for timestamp ties. A terminal event preserves the recommended route and reason, eligible source snapshots, guardrail results, and complete result payload. Stage events preserve typed outcomes as they resolve, so a reviewer can inspect durable progress even if a later stage or run export fails.
 
 ## Current implementation status
 
-`scripts/init_runtime_db.py` creates or verifies these three tables, indexes, foreign keys, and schema version 2. It preserves existing records and initializes an empty database when none exists. The `cloudserve run` path writes one ticket and audit row for each input item, then exports results from those audit records. Classification, retrieval, source-bound drafting, guardrail checks, and complete handoffs are recorded in each ticket's result payload and audit event. Drafts remain unapproved and unsent; downstream dashboard or case-management tools own assignment, approval, and any later send action.
+`scripts/init_runtime_db.py` creates or verifies these three tables, indexes, foreign keys, and schema version 2. It preserves existing records and initializes an empty database when none exists. The `cloudserve run` path creates one running ticket row per input before stage work, commits classification, retrieval, routing, and generation checkpoints, and appends one terminal event per occurrence. Exports are regenerated from those persisted events after processing. Retrieval checkpoints omit source text; terminal source snapshots contain only passages that passed current eligibility and guardrail filtering. Drafts remain unapproved and unsent; downstream dashboard or case-management tools own assignment, approval, and any later send action.

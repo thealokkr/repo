@@ -903,6 +903,8 @@ def _decision_events_by_key(
     """Index one current-run event per ticket and flag cross-run or duplicate matches."""
     grouped_events: dict[tuple[int, str], list[dict[str, Any]]] = defaultdict(list)
     for decision in _read_jsonl(decision_log_path):
+        if decision.get("terminal", True) is not True:
+            continue
         input_index = decision.get("input_index")
         ticket_id = decision.get("ticket_id")
         if (

@@ -173,7 +173,13 @@ def test_one_ticket_run_persists_label_audit_and_schema_valid_exports(
     results = _read_jsonl(output_directory / "results.jsonl")
     decisions = _read_jsonl(output_directory / "decision_log.jsonl")
     exceptions = _read_jsonl(output_directory / "exceptions.jsonl")
-    assert len(results) == len(decisions) == 1
+    assert len(results) == 1
+    assert [decision["event_type"] for decision in decisions] == [
+        "classification", "retrieval", "routing", "generation", "ticket_completed",
+    ]
+    assert [decision["terminal"] for decision in decisions] == [False] * 4 + [True]
+    assert all("action_taken" not in decision for decision in decisions[:-1])
+    assert decisions[-1]["result"] == results[0]
     assert exceptions == []
     assert results[0]["ticket_id"] == "DEV-0001"
     assert results[0]["route"] == "draft_for_review"
@@ -229,16 +235,17 @@ def test_one_ticket_run_persists_label_audit_and_schema_valid_exports(
         assert run_row == (run_id, "cs001-tracer", str(output_directory), "completed")
         assert connection.execute("SELECT COUNT(*) FROM ticket_runs WHERE run_id = ?", (run_id,)).fetchone()[0] == 1
         audit_row = connection.execute(
-            "SELECT event_id, ticket_id, result_payload_json, sources_json FROM audit_events WHERE run_id = ?",
+            "SELECT event_id, ticket_id, result_payload_json, sources_json FROM audit_events "
+            "WHERE run_id = ? AND event_type = 'ticket_completed'",
             (run_id,),
         ).fetchone()
         assert audit_row is not None
-        assert decisions[0]["event_id"] == audit_row[0]
+        assert decisions[-1]["event_id"] == audit_row[0]
         assert audit_row[1] == "DEV-0001"
-        assert json.loads(audit_row[2]) == results[0]
+        assert json.loads(audit_row[2])["result"] == results[0]
         assert json.loads(audit_row[3]) == results[0]["sources"]
         audit_provenance = connection.execute(
-        "SELECT model_name, prediction_json, alternatives_json, threshold_applied, requirement_ids_json, guardrail_results_json FROM audit_events WHERE run_id = ?",
+        "SELECT model_name, prediction_json, alternatives_json, threshold_applied, requirement_ids_json, guardrail_results_json FROM audit_events WHERE run_id = ? AND event_type = 'ticket_completed'",
             (run_id,),
         ).fetchone()
         assert audit_provenance is not None
@@ -261,6 +268,110 @@ def test_one_ticket_run_persists_label_audit_and_schema_valid_exports(
         assert "history-must-not-enter-runtime" not in stored_text
     finally:
         connection.close()
+
+
+def test_stage_checkpoints_commit_before_the_next_batch_phase(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_decisions_api_mock(monkeypatch, lambda ticket_fields: ("unclear_request", "medium"))
+    database_path = tmp_path / "runtime.sqlite3"
+    input_path = tmp_path / "two-tickets.json"
+    records = [
+        {"ticket_id": f"STAGE-{index}", "channel": "chat", "subject": "Question", "body": "Please clarify this request."}
+        for index in range(1, 3)
+    ]
+    input_path.write_text(json.dumps(records), encoding="utf-8")
+
+    real_classify = run_tickets_module.classify_ticket_batches
+    real_route = run_tickets_module.route_ticket_classification
+
+    def assert_database_event_count(event_type: str, expected_count: int) -> None:
+        with sqlite3.connect(database_path) as connection:
+            actual = connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE event_type = ?", (event_type,)
+            ).fetchone()[0]
+        assert actual == expected_count
+
+    def checked_classify(tickets: list[object], settings: object) -> object:
+        with sqlite3.connect(database_path) as connection:
+            rows = connection.execute(
+                "SELECT processing_status FROM ticket_runs ORDER BY ticket_id"
+            ).fetchall()
+        assert rows == [("running",), ("running",)]
+        return real_classify(tickets, settings)
+
+    retrieval_count = 0
+
+    class CheckedRetriever:
+        def retrieve_many(
+            self,
+            tickets: list[object],
+            *,
+            embedding_batch_size: int,
+            query_batch_size: int,
+        ) -> tuple[RetrievalResult, ...]:
+            nonlocal retrieval_count
+            assert_database_event_count("classification", 2)
+            assert embedding_batch_size > 0
+            assert query_batch_size > 0
+            results = tuple(_ReadyRetriever().retrieve(ticket) for ticket in tickets)
+            retrieval_count += len(results)
+            return results
+
+    route_count = 0
+
+    def checked_route(*args: object, **kwargs: object) -> object:
+        nonlocal route_count
+        assert_database_event_count("retrieval", 2)
+        assert_database_event_count("routing", route_count)
+        route_count += 1
+        return real_route(*args, **kwargs)
+
+    monkeypatch.setattr(run_tickets_module, "classify_ticket_batches", checked_classify)
+    monkeypatch.setattr(run_tickets_module, "route_ticket_classification", checked_route)
+    run_id, output_directory, metrics = run_ticket_batch(
+        input_path=input_path,
+        output_root=tmp_path / "outputs",
+        database_path=database_path,
+        retriever=CheckedRetriever(),
+        policy_path=TEST_ROUTING_POLICY_PATH,
+    )
+
+    results = _read_jsonl(output_directory / "results.jsonl")
+    decisions = _read_jsonl(output_directory / "decision_log.jsonl")
+    assert [result["input_index"] for result in results] == [0, 1]
+    assert len(decisions) == 10
+    assert sum(event["terminal"] for event in decisions) == 2
+    assert metrics["evaluation"]["run_observed"]["technical"]["decision_log_reconciliation"]["numerator"] == 2
+    assert_database_event_count("ticket_completed", 2)
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT event_type, result_payload_json, sources_json FROM audit_events "
+            "WHERE run_id = ? ORDER BY rowid",
+            (run_id,),
+        ).fetchall()
+        ticket_statuses = connection.execute(
+            "SELECT processing_status FROM ticket_runs WHERE run_id = ? ORDER BY ticket_id",
+            (run_id,),
+        ).fetchall()
+    assert [event_type for event_type, _, _ in rows] == [
+        "classification", "classification", "retrieval", "retrieval",
+        "routing", "routing", "generation", "ticket_completed",
+        "generation", "ticket_completed",
+    ]
+    assert ticket_statuses == [("completed",), ("completed",)]
+    exported_stage_rows = [event for event in decisions if not event["terminal"]]
+    assert [event["stage_result"]["status"] for event in exported_stage_rows] == [
+        "classified", "classified", "ready", "ready", "decided", "decided",
+        "not_attempted", "not_attempted",
+    ]
+    for event_type, payload_json, sources_json in rows:
+        payload = json.loads(payload_json)
+        if event_type == "retrieval":
+            assert "passage_text" not in payload_json
+            assert payload["value"]["passages"][0]["passage_id"] == "DOC-INT-001:sample:0"
+            assert json.loads(sources_json) == []
 
 
 def test_ticket_duration_includes_audit_commit_and_is_persisted_with_result(
@@ -308,13 +419,13 @@ def test_ticket_duration_includes_audit_commit_and_is_persisted_with_result(
     connection = sqlite3.connect(tmp_path / "runtime.sqlite3")
     try:
         persisted_payload = connection.execute(
-            "SELECT result_payload_json FROM audit_events WHERE run_id = ?",
+            "SELECT result_payload_json FROM audit_events WHERE run_id = ? AND event_type IN ('ticket_completed', 'ticket_failed')",
             (run_id,),
         ).fetchone()
     finally:
         connection.close()
     assert persisted_payload is not None
-    assert json.loads(persisted_payload[0]) == result
+    assert json.loads(persisted_payload[0])["result"] == result
 
 
 def test_each_run_exports_to_its_own_output_directory(
@@ -381,6 +492,7 @@ def test_malformed_ticket_still_gets_one_degraded_result_and_exception(
     )
 
     results = _read_jsonl(output_directory / "results.jsonl")
+    decisions = _read_jsonl(output_directory / "decision_log.jsonl")
     exceptions = _read_jsonl(output_directory / "exceptions.jsonl")
     assert len(results) == 3
     assert len(exceptions) == 2
@@ -457,6 +569,7 @@ def test_four_channel_batch_keeps_later_tickets_after_malformed_record(
     )
 
     results = _read_jsonl(output_directory / "results.jsonl")
+    decisions = _read_jsonl(output_directory / "decision_log.jsonl")
     exceptions = _read_jsonl(output_directory / "exceptions.jsonl")
     assert len(results) == len(records) == 5
     assert [result["input_index"] for result in results] == list(range(5))
@@ -666,7 +779,7 @@ def test_classifier_batch_provider_failure_degrades_the_whole_batch(
         ).fetchone()[0] == 2
         assert connection.execute(
             "SELECT COUNT(*) FROM audit_events WHERE run_id = ?", (run_id,)
-        ).fetchone()[0] == 2
+        ).fetchone()[0] == 10
     finally:
         connection.close()
 
@@ -774,11 +887,11 @@ def test_generation_failures_degrade_each_ticket_and_continue(
         ).fetchone()[0] == 3
         assert connection.execute(
             "SELECT COUNT(*) FROM audit_events WHERE run_id = ?", (run_id,)
-        ).fetchone()[0] == 3
+        ).fetchone()[0] == 15
         guardrails = [
             json.loads(row[0])
             for row in connection.execute(
-                "SELECT guardrail_results_json FROM audit_events WHERE run_id = ? ORDER BY occurred_at",
+                "SELECT guardrail_results_json FROM audit_events WHERE run_id = ? AND event_type IN ('ticket_completed', 'ticket_failed') ORDER BY rowid",
                 (run_id,),
             )
         ]
@@ -912,6 +1025,7 @@ def test_unresolved_claim_citation_is_blocked_and_escalated(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _install_decisions_api_mock(monkeypatch, lambda ticket_fields: ("api", "medium"))
     schema_directory = tmp_path / "schemas" / "outputs"
     initialize_output_schemas(schema_directory)
     monkeypatch.setattr(
@@ -934,6 +1048,8 @@ def test_unresolved_claim_citation_is_blocked_and_escalated(
 
     result = _read_jsonl(output_directory / "results.jsonl")[0]
     assert result["route"] == "escalate"
+    assert result["routing"]["matched_rule"] == "generation_guardrail_blocked"
+    assert result["routing"]["protected_case"] is False
     assert result["draft"] is None
     assert result["draft_response"] is None
     assert result["handoff"]["issue"]
@@ -1243,7 +1359,7 @@ def test_private_retrieved_source_is_withheld_before_generator_call(
     connection = sqlite3.connect(tmp_path / "runtime.sqlite3")
     try:
         persisted = connection.execute(
-            "SELECT sources_json, guardrail_results_json FROM audit_events WHERE run_id = ?",
+            "SELECT sources_json, guardrail_results_json FROM audit_events WHERE run_id = ? AND event_type IN ('ticket_completed', 'ticket_failed')",
             (run_id,),
         ).fetchone()
         assert persisted is not None
@@ -1322,6 +1438,10 @@ def test_generated_ticket_id_collision_uses_unique_storage_ids(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _install_decisions_api_mock(
+        monkeypatch,
+        lambda ticket_fields: ("unclear_request", "medium"),
+    )
     schema_directory = tmp_path / "schemas" / "outputs"
     initialize_output_schemas(schema_directory)
     monkeypatch.setattr(
@@ -1344,10 +1464,12 @@ def test_generated_ticket_id_collision_uses_unique_storage_ids(
         input_path=input_path,
         output_root=tmp_path / "outputs",
         database_path=tmp_path / "runtime.sqlite3",
+        retriever=_ReadyRetriever(),
         policy_path=TEST_ROUTING_POLICY_PATH,
     )
 
     results = _read_jsonl(output_directory / "results.jsonl")
+    decisions = _read_jsonl(output_directory / "decision_log.jsonl")
     exceptions = _read_jsonl(output_directory / "exceptions.jsonl")
     assert len(results) == len(records) == 2
     assert [result["ticket_id"] for result in results] == [
@@ -1358,6 +1480,10 @@ def test_generated_ticket_id_collision_uses_unique_storage_ids(
     assert exceptions[0]["input_index"] == 0
     assert metrics["total_count"] == 2
     assert metrics["failed_count"] == 1
+    terminal_events = [event for event in decisions if event["terminal"]]
+    assert {event["ticket_occurrence_id"] for event in terminal_events} == {
+        "invalid-000001", "invalid-000001#input-000002",
+    }
 
     connection = sqlite3.connect(tmp_path / "runtime.sqlite3")
     try:
@@ -1373,7 +1499,7 @@ def test_generated_ticket_id_collision_uses_unique_storage_ids(
         ]
         assert connection.execute(
             "SELECT COUNT(*) FROM audit_events WHERE run_id = ?", (run_id,)
-        ).fetchone()[0] == 2
+        ).fetchone()[0] == 10
     finally:
         connection.close()
 
@@ -1434,7 +1560,7 @@ def test_unpaired_surrogate_ticket_id_degrades_and_later_ticket_completes(
         ).fetchone()[0] == 2
         assert connection.execute(
             "SELECT COUNT(*) FROM audit_events WHERE run_id = ?", (run_id,)
-        ).fetchone()[0] == 2
+        ).fetchone()[0] == 10
     finally:
         connection.close()
 
@@ -1522,7 +1648,7 @@ def test_unpaired_surrogate_in_operational_context_degrades_and_continues(
         assert "history" not in persisted_text
         assert connection.execute(
             "SELECT COUNT(*) FROM audit_events WHERE run_id = ?", (run_id,)
-        ).fetchone()[0] == 2
+        ).fetchone()[0] == 10
     finally:
         connection.close()
 

@@ -120,7 +120,7 @@ def test_audit_persistence_failure_rolls_back_and_does_not_return_success(
         raise sqlite3.OperationalError("simulated disk write failure")
 
     monkeypatch.setattr(
-        "cloudserve_support.processing.run_tickets.create_ticket_audit_records",
+        "cloudserve_support.processing.run_tickets.create_audit_event_record",
         fail_audit_insert,
     )
     input_path = tmp_path / "ticket.json"
@@ -141,7 +141,10 @@ def test_audit_persistence_failure_rolls_back_and_does_not_return_success(
             "SELECT status FROM processing_runs"
         ).fetchone()
         assert run_status == ("failed",)
-        assert connection.execute("SELECT COUNT(*) FROM ticket_runs").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM ticket_runs").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT processing_status FROM ticket_runs"
+        ).fetchone() == ("running",)
     finally:
         connection.close()

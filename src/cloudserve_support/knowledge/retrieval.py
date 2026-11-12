@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
+from numbers import Real
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import chromadb
 from openai import OpenAI
@@ -34,6 +36,9 @@ MINIMUM_SIMILARITY = 0.45
 MAXIMUM_SOURCES = 3
 QUERY_EMBEDDING_TIMEOUT_SECONDS = 15.0
 QUERY_EMBEDDING_MAX_RETRIES = 0
+# Initial measured five-ticket settings; the downstream 5/50 CLI acceptance verifies them.
+DEFAULT_EMBEDDING_BATCH_SIZE = 5
+DEFAULT_QUERY_BATCH_SIZE = 5
 REQUIRED_PASSAGE_METADATA = (
     "doc_id",
     "title",
@@ -291,6 +296,138 @@ class KnowledgeRetriever:
                 "Knowledge retrieval returned incomplete index records; no source was used.",
             )
 
+        return self._result_from_candidates(ids, documents, metadatas, distances)
+
+    def retrieve_many(
+        self,
+        tickets: Sequence[CanonicalTicket],
+        *,
+        embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
+        query_batch_size: int = DEFAULT_QUERY_BATCH_SIZE,
+    ) -> tuple[RetrievalResult, ...]:
+        """Retrieve ordered ticket results using bounded embedding and Chroma batches."""
+        _require_positive_batch_size(embedding_batch_size, "embedding_batch_size")
+        _require_positive_batch_size(query_batch_size, "query_batch_size")
+        if not tickets:
+            return ()
+        if self.unavailable_reason:
+            return tuple(
+                self._empty_result("unavailable", *self.unavailable_reason)
+                for _ in tickets
+            )
+
+        results: list[RetrievalResult | None] = [None] * len(tickets)
+        searchable: list[tuple[int, str]] = []
+        for position, ticket in enumerate(tickets):
+            query_text, query_error = _ticket_query_text(ticket)
+            if query_error is not None:
+                status, reason_code, reason = query_error
+                results[position] = self._empty_result(status, reason_code, reason)
+            else:
+                searchable.append((position, query_text))
+
+        vectors: dict[int, list[float]] = {}
+        for chunk_start in range(0, len(searchable), embedding_batch_size):
+            chunk = searchable[chunk_start : chunk_start + embedding_batch_size]
+            try:
+                response = self.embedding_client.embeddings.create(
+                    model=self.settings.embedding_model,
+                    input=[query_text for _, query_text in chunk],
+                )
+            except Exception as error:
+                reason_code = (
+                    "query_embedding_timeout"
+                    if "timeout" in type(error).__name__.casefold()
+                    else "retrieval_provider_or_index_error"
+                )
+                reason = (
+                    "Query embedding request timed out; no knowledge source was used."
+                    if reason_code == "query_embedding_timeout"
+                    else "Knowledge retrieval failed; no source was used."
+                )
+                for position, _ in chunk:
+                    results[position] = self._empty_result("unavailable", reason_code, reason)
+                continue
+            try:
+                indexed_vectors = _parse_embedding_response(response, len(chunk))
+            except Exception:
+                for position, _ in chunk:
+                    results[position] = self._empty_result(
+                        "unavailable",
+                        "invalid_embedding_response",
+                        "Query embedding response was invalid; no knowledge source was used.",
+                    )
+                continue
+
+            for local_position, (position, _) in enumerate(chunk):
+                vector = indexed_vectors[local_position]
+                if not _is_valid_embedding_vector(vector):
+                    results[position] = self._empty_result(
+                        "unavailable",
+                        "invalid_embedding_response",
+                        "Query embedding response was invalid; no knowledge source was used.",
+                    )
+                else:
+                    vectors[position] = vector
+
+        query_positions = list(vectors)
+        for chunk_start in range(0, len(query_positions), query_batch_size):
+            chunk_positions = query_positions[chunk_start : chunk_start + query_batch_size]
+            query_vectors = [vectors[position] for position in chunk_positions]
+            try:
+                query_result = self.collection.query(
+                    query_embeddings=query_vectors,
+                    n_results=self.collection.count(),
+                    include=["documents", "metadatas", "distances"],
+                )
+            except Exception:
+                for position in chunk_positions:
+                    results[position] = self._empty_result(
+                        "unavailable",
+                        "retrieval_provider_or_index_error",
+                        "Knowledge retrieval failed; no source was used.",
+                    )
+                continue
+            try:
+                query_rows = _parse_chroma_query_rows(query_result, len(chunk_positions))
+            except Exception:
+                for position in chunk_positions:
+                    results[position] = self._empty_result(
+                        "unavailable",
+                        "invalid_index_response",
+                        "Knowledge retrieval returned incomplete index records; no source was used.",
+                    )
+                continue
+
+            for position, query_row in zip(chunk_positions, query_rows, strict=True):
+                if query_row is None:
+                    results[position] = self._empty_result(
+                        "unavailable",
+                        "invalid_index_response",
+                        "Knowledge retrieval returned incomplete index records; no source was used.",
+                    )
+                else:
+                    results[position] = self._result_from_candidates(*query_row)
+
+        if any(result is None for result in results):
+            raise RuntimeError("Bulk retrieval failed to resolve every ticket position.")
+        return tuple(result for result in results if result is not None)
+
+    def _result_from_candidates(
+        self,
+        ids: list[Any],
+        documents: list[Any],
+        metadatas: list[Any],
+        distances: list[Any],
+    ) -> RetrievalResult:
+        """Apply current provenance, freshness, and similarity rules to one query row."""
+        if not (len(ids) == len(documents) == len(metadatas) == len(distances)):
+            return self._empty_result(
+                "unavailable",
+                "invalid_index_response",
+                "Knowledge retrieval returned incomplete index records; no source was used.",
+            )
+
         excluded = Counter()
         current_eligible_count = 0
         eligible: list[tuple[float, dict[str, Any]]] = []
@@ -362,11 +499,13 @@ class KnowledgeRetriever:
 
     def _source_exclusion_reason(
         self,
-        passage_id: str,
+        passage_id: Any,
         document: Any,
         metadata: Any,
     ) -> str | None:
         """Check index records against source text and project metadata before use."""
+        if not isinstance(passage_id, str):
+            return "unresolvable_source_reference"
         if not isinstance(metadata, dict):
             return "missing_required_metadata"
         missing = [key for key in REQUIRED_PASSAGE_METADATA if key not in metadata]
@@ -448,3 +587,100 @@ def _first_query_list(query_result: dict[str, Any], key: str) -> list[Any]:
     if not isinstance(values, list) or not values or not isinstance(values[0], list):
         return []
     return values[0]
+
+
+def _require_positive_batch_size(batch_size: int, argument_name: str) -> None:
+    """Reject invalid batch sizes before any embedding or Chroma requests."""
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+        raise ValueError(f"{argument_name} must be a positive integer.")
+
+
+def _ticket_query_text(
+    ticket: CanonicalTicket,
+) -> tuple[str, tuple[str, str, str] | None]:
+    """Build subject/body-only retrieval text or return its explicit local outcome."""
+    if not isinstance(ticket, CanonicalTicket):
+        return "", (
+            "no_hit",
+            "invalid_query",
+            "The ticket query is invalid; no knowledge source was used.",
+        )
+    if not isinstance(ticket.subject, str) or not isinstance(ticket.body, str):
+        return "", (
+            "no_hit",
+            "invalid_query",
+            "The ticket query is invalid; no knowledge source was used.",
+        )
+    query_text = "\n".join(
+        part for part in (ticket.subject.strip(), ticket.body.strip()) if part
+    )
+    if not query_text:
+        return "", (
+            "no_hit",
+            "empty_query",
+            "The ticket has no searchable subject or body text.",
+        )
+    return query_text, None
+
+
+def _parse_embedding_response(response: Any, expected_count: int) -> list[Any]:
+    """Map OpenAI embedding rows by strict response index, rejecting ambiguous chunks."""
+    data = getattr(response, "data", None)
+    if not isinstance(data, list) or len(data) != expected_count:
+        raise ValueError("Embedding response count does not match the request.")
+    indexed_rows: list[Any] = [None] * expected_count
+    seen_indexes: set[int] = set()
+    for row in data:
+        index = getattr(row, "index", None)
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or index < 0
+            or index >= expected_count
+            or index in seen_indexes
+        ):
+            raise ValueError("Embedding response indexes are ambiguous.")
+        seen_indexes.add(index)
+        indexed_rows[index] = getattr(row, "embedding", None)
+    if len(seen_indexes) != expected_count:
+        raise ValueError("Embedding response indexes are incomplete.")
+    return indexed_rows
+
+
+def _is_valid_embedding_vector(vector: Any) -> bool:
+    """Require a finite 1536-dimension numeric vector for the packaged Chroma index."""
+    if not isinstance(vector, (list, tuple)) or len(vector) != EMBEDDING_DIMENSIONS:
+        return False
+    for value in vector:
+        if not isinstance(value, Real) or isinstance(value, bool):
+            return False
+        try:
+            if not math.isfinite(float(value)):
+                return False
+        except (OverflowError, ValueError):
+            return False
+    return True
+
+
+def _parse_chroma_query_rows(
+    query_result: Any,
+    expected_count: int,
+) -> list[tuple[list[Any], list[Any], list[Any], list[Any]] | None]:
+    """Align Chroma query rows and isolate identifiable row-level shape failures."""
+    if not isinstance(query_result, dict):
+        raise ValueError("Chroma query response must be an object.")
+    arrays = [query_result.get(key) for key in ("ids", "documents", "metadatas", "distances")]
+    if any(not isinstance(rows, list) or len(rows) != expected_count for rows in arrays):
+        raise ValueError("Chroma query response rows do not align with request positions.")
+
+    query_rows: list[tuple[list[Any], list[Any], list[Any], list[Any]] | None] = []
+    for row_values in zip(*arrays, strict=True):
+        if any(not isinstance(values, list) for values in row_values):
+            query_rows.append(None)
+            continue
+        ids, documents, metadatas, distances = row_values
+        if not (len(ids) == len(documents) == len(metadatas) == len(distances)):
+            query_rows.append(None)
+            continue
+        query_rows.append((ids, documents, metadatas, distances))
+    return query_rows

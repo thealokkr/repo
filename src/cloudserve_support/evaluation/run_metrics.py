@@ -24,6 +24,8 @@ EXPECTED_ROUTE_LABEL_VALUES = frozenset(
 )
 PUBLIC_ROUTE_VALUES = frozenset({"draft_for_review", "escalate", "degrade"})
 INTENT_PRECISION_TARGET = 0.85
+# The terminal report applies the same 85% threshold to total labeled intent accuracy.
+INTENT_ACCURACY_TARGET = INTENT_PRECISION_TARGET
 URGENCY_PRECISION_TARGET = 0.70
 def evaluate_completed_run(
     *,
@@ -35,6 +37,9 @@ def evaluate_completed_run(
     decision_events: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Compare persisted run results with evaluation-only labels and historical outcomes."""
+    decision_events = [
+        event for event in decision_events if event.get("terminal", True) is True
+    ]
     source_set = _source_set(source_ref)
     record_by_index = {index: record for index, record in enumerate(input_records)}
     result_by_index: dict[int, dict[str, Any]] = {}
@@ -1164,6 +1169,8 @@ def _count_matching_decisions(
     matched = 0
     seen: set[int] = set()
     for event in decision_events:
+        if event.get("terminal", True) is not True:
+            continue
         result = result_by_index.get(event.get("input_index"))
         input_index = event.get("input_index")
         if (

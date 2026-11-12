@@ -238,29 +238,124 @@ def create_ticket_audit_records(
     )
 
 
-def update_ticket_audit_result_payload(
+def create_ticket_run_record(
     connection: sqlite3.Connection,
     *,
     run_id: str,
     storage_ticket_id: str,
+    channel: str,
+    received_at: str | None,
+    customer_tier: str | None,
+    language_fluency: str | None,
+    context: dict[str, Any],
+) -> None:
+    """Insert one running ticket occurrence before its first processing stage."""
+    import json
+
+    connection.execute(
+        """INSERT INTO ticket_runs
+           (run_id, ticket_id, channel, received_at, customer_tier, language_fluency,
+            context_json, processing_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'running')""",
+        (
+            run_id, storage_ticket_id, channel, received_at, customer_tier,
+            language_fluency, json.dumps(context, ensure_ascii=False),
+        ),
+    )
+
+
+def create_audit_event_record(
+    connection: sqlite3.Connection,
+    *,
+    event_id: str,
+    run_id: str,
+    storage_ticket_id: str,
+    occurred_at: str,
+    event_type: str,
+    result_payload: dict[str, Any],
+    input_summary: str | None = None,
+    model_name: str | None = None,
+    prompt_version: str | None = None,
+    prediction: dict[str, Any] | None = None,
+    requirement_ids: list[str] | None = None,
+    alternatives: list[dict[str, Any]] | None = None,
+    threshold_applied: float | None = None,
+    action_taken: str | None = None,
+    reason: str | None = None,
+    guardrail_results: dict[str, Any] | None = None,
+    sources: list[dict[str, Any]] | None = None,
+) -> None:
+    """Append one stage or terminal event for an existing ticket occurrence."""
+    import json
+
+    connection.execute(
+        """INSERT INTO audit_events
+           (event_id, run_id, ticket_id, occurred_at, event_type, actor_type,
+            input_summary, model_name, prompt_version, requirement_ids_json,
+            prediction_json, alternatives_json, threshold_applied, action_taken,
+            reason, guardrail_results_json, sources_json, result_payload_json)
+           VALUES (?, ?, ?, ?, ?, 'system', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            event_id,
+            run_id,
+            storage_ticket_id,
+            occurred_at,
+            event_type,
+            input_summary,
+            model_name,
+            prompt_version,
+            json.dumps(requirement_ids or [], ensure_ascii=False),
+            json.dumps(prediction, ensure_ascii=False) if prediction is not None else None,
+            json.dumps(alternatives or [], ensure_ascii=False),
+            threshold_applied,
+            action_taken,
+            reason,
+            json.dumps(guardrail_results or {}, ensure_ascii=False),
+            json.dumps(sources or [], ensure_ascii=False),
+            json.dumps(result_payload, ensure_ascii=False),
+        ),
+    )
+
+
+def update_ticket_run_status(
+    connection: sqlite3.Connection,
+    *,
+    run_id: str,
+    storage_ticket_id: str,
+    processing_status: str,
+    error_code: str | None,
+    error_message: str | None,
+) -> None:
+    """Mark an occurrence terminal after its terminal audit event is inserted."""
+    cursor = connection.execute(
+        """UPDATE ticket_runs SET processing_status = ?, error_code = ?, error_message = ?
+           WHERE run_id = ? AND ticket_id = ?""",
+        (processing_status, error_code, error_message, run_id, storage_ticket_id),
+    )
+    if cursor.rowcount != 1:
+        raise RuntimeError("Expected exactly one ticket occurrence when recording its status.")
+
+
+def update_terminal_audit_event_payload(
+    connection: sqlite3.Connection,
+    *,
+    event_id: str,
     result_payload: dict[str, Any],
 ) -> None:
-    """Persist post-commit timing metadata on the matching audit event."""
+    """Refresh one terminal event after measured processing time is known."""
     import json
 
     cursor = connection.execute(
-        """UPDATE audit_events SET result_payload_json = ?
-           WHERE run_id = ? AND ticket_id = ?""",
+        """UPDATE audit_events SET result_payload_json = ?, sources_json = ?
+           WHERE event_id = ? AND event_type IN ('ticket_completed', 'ticket_failed')""",
         (
             json.dumps(result_payload, ensure_ascii=False),
-            run_id,
-            storage_ticket_id,
+            json.dumps(result_payload.get("result", {}).get("sources", []), ensure_ascii=False),
+            event_id,
         ),
     )
     if cursor.rowcount != 1:
-        raise RuntimeError(
-            "Expected exactly one matching ticket audit event when recording latency."
-        )
+        raise RuntimeError("Expected exactly one terminal event when recording latency.")
 
 
 def read_run_audit_events(
@@ -274,7 +369,7 @@ def read_run_audit_events(
                       actor_type, action_taken, reason, sources_json,
                       guardrail_results_json, result_payload_json
                FROM audit_events WHERE run_id = ?
-               ORDER BY occurred_at ASC, event_id ASC""",
+               ORDER BY occurred_at ASC, rowid ASC""",
             (run_id,),
         )
     )

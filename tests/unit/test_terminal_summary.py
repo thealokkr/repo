@@ -74,39 +74,20 @@ def test_terminal_summary_reports_prediction_metrics_and_post_run_label_matches(
 
     assert summary["processed_count"] == 3
     assert summary["exception_count"] == 0
-    assert summary["predicted_counts"]["intent"] == {
-        "account_access": 1,
-        "billing_query": 2,
-    }
-    assert summary["intent_quality"]["billing_query"] == {
-        "support": 1,
-        "predicted_count": 2,
-        "correct_count": 1,
-        "label_match_count": 1,
-        "precision": 0.5,
-        "recall": 1.0,
-        "precision_target_status": "below_target",
-    }
-    assert summary["intent_quality"]["api_key_issue"]["precision"] is None
-    assert summary["intent_precision_target"] == {
-        "threshold": 0.85,
+    assert summary["classification_accuracy"] == {
+        "correct_count": 2,
+        "sample_count": 3,
+        "percentage": 66.7,
+        "target_percentage": 85.0,
         "status": "below_target",
-        "supported_class_count": 3,
-        "meeting_class_count": 1,
-        "note": "Development-set criterion; unsupported or unpredicted classes are not applicable and do not count as meeting the target.",
     }
-    assert summary["urgency_quality"]["precision_target"] == 0.70
-    assert summary["urgency_quality"]["target_status"] == "below_target"
-    assert summary["urgency_quality"]["exact_match_count"] == 2
-    assert summary["urgency_quality"]["sample_count"] == 3
-    assert summary["urgency_quality"]["per_class"]["low"]["precision"] == 0.5
-    assert summary["urgency_quality"]["per_class"]["low"]["precision_target_status"] == "below_target"
-    assert summary["label_match_counts"]["urgency"] == {
-        "matched": 2,
-        "mismatched": 1,
-        "denominator": 3,
-        "label_counts": {"high": 1, "low": 1, "medium": 1},
+    assert "intent_quality" not in summary
+    assert summary["urgency_accuracy"] == {
+        "correct_count": 2,
+        "sample_count": 3,
+        "percentage": 66.7,
     }
+    assert "per_class" not in summary
     assert summary["answerability"]["evidence_availability_proxy_matches"] == 3
     assert summary["protected_cases"] == {
         "label_count": 2,
@@ -136,21 +117,14 @@ def test_terminal_summary_includes_unlabeled_predictions_and_undefined_label_met
     )
 
     assert summary["exception_count"] == 1
-    assert summary["predicted_counts"]["intent"] == {"unknown": 1}
-    assert summary["intent_quality"] == {"unknown": {
-        "support": 0,
-        "predicted_count": 1,
+    assert summary["classification_accuracy"] == {
         "correct_count": 0,
-        "label_match_count": 0,
-        "precision": None,
-        "recall": None,
-        "precision_target_status": "not_applicable",
-    }}
-    assert summary["undefined_metrics"] == [
-        {"intent": "unknown", "metric": "precision"},
-        {"intent": "unknown", "metric": "recall"},
-    ]
-    assert summary["intent_precision_target"]["status"] == "not_applicable"
+        "sample_count": 0,
+        "percentage": None,
+        "target_percentage": 85.0,
+        "status": "not_applicable",
+    }
+    assert "intent_quality" not in summary
 
 
 def test_terminal_summary_uses_canonical_route_answerability_and_safety_metrics():

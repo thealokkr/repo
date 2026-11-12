@@ -41,38 +41,90 @@ def write_run_exports(
             "persisted ticket occurrences."
         )
     event_ticket_ids = [event["ticket_id"] for event in events]
-    if (
-        len(event_ticket_ids) != len(persisted_ticket_ids)
-        or len(set(event_ticket_ids)) != len(event_ticket_ids)
-        or set(event_ticket_ids) != set(persisted_ticket_ids)
-    ):
+    if not set(event_ticket_ids).issubset(set(persisted_ticket_ids)):
         raise RuntimeError(
-            "Export reconciliation failed: each persisted ticket occurrence must "
-            "have exactly one audit result."
+            "Export reconciliation failed: an audit event has an unknown ticket occurrence."
         )
 
     decisions: list[dict[str, Any]] = []
     results: list[dict[str, Any]] = []
+    terminal_events: list[dict[str, Any]] = []
+    terminal_ticket_ids: set[str] = set()
+    identity_by_occurrence: dict[str, tuple[int, str]] = {}
     for event in events:
-        result = json.loads(event["result_payload_json"])
-        results.append(result)
-        decisions.append(
-            {
-                "event_id": event["event_id"],
-                "run_id": event["run_id"],
-                "input_index": result["input_index"],
-                "ticket_id": result["ticket_id"],
-                "occurred_at": event["occurred_at"],
-                "event_type": event["event_type"],
-                "actor_type": event["actor_type"],
-                "action_taken": event["action_taken"],
-                "reason": event["reason"],
-                "result": result,
+        payload = json.loads(event["result_payload_json"])
+        input_index = payload.get("input_index")
+        ticket_id = payload.get("ticket_id")
+        if (
+            not isinstance(input_index, int)
+            or isinstance(input_index, bool)
+            or not 0 <= input_index < len(input_records)
+            or not isinstance(ticket_id, str)
+        ):
+            raise RuntimeError("Export reconciliation failed: audit event identity is invalid.")
+        occurrence_id = event["ticket_id"]
+        identity = (input_index, ticket_id)
+        if (
+            occurrence_id in identity_by_occurrence
+            and identity_by_occurrence[occurrence_id] != identity
+        ):
+            raise RuntimeError(
+                "Export reconciliation failed: events disagree on ticket occurrence identity."
+            )
+        identity_by_occurrence[occurrence_id] = identity
+        decision = {
+            "event_id": event["event_id"],
+            "run_id": event["run_id"],
+            "ticket_occurrence_id": event["ticket_id"],
+            "input_index": input_index,
+            "ticket_id": ticket_id,
+            "occurred_at": event["occurred_at"],
+            "event_type": event["event_type"],
+            "actor_type": event["actor_type"],
+            "terminal": event["event_type"] in {"ticket_completed", "ticket_failed"},
+        }
+        if decision["terminal"]:
+            if occurrence_id in terminal_ticket_ids:
+                raise RuntimeError("Export reconciliation failed: duplicate terminal occurrence event.")
+            result = payload.get("result")
+            if not isinstance(result, dict):
+                raise RuntimeError("Export reconciliation failed: terminal event has no result.")
+            if input_index in {record["input_index"] for record in results}:
+                raise RuntimeError("Export reconciliation failed: duplicate terminal input index.")
+            if result.get("input_index") != input_index or result.get("ticket_id") != ticket_id:
+                raise RuntimeError("Export reconciliation failed: terminal result identity differs from its event.")
+            results.append(result)
+            terminal_ticket_ids.add(occurrence_id)
+            terminal_events.append(decision)
+            decision.update(
+                {
+                    "action_taken": event["action_taken"],
+                    "reason": event["reason"],
+                    "result": result,
+                }
+            )
+        else:
+            stage = payload.get("stage")
+            if not isinstance(stage, str) or stage != event["event_type"]:
+                raise RuntimeError("Export reconciliation failed: stage event identity is invalid.")
+            decision["stage_result"] = {
+                "stage": stage,
+                "status": payload.get("status"),
+                "value": payload.get("value"),
+                "reason": payload.get("reason"),
             }
+        decisions.append(decision)
+
+    if (
+        terminal_ticket_ids != set(persisted_ticket_ids)
+        or len(terminal_events) != len(persisted_ticket_ids)
+    ):
+        raise RuntimeError(
+            "Export reconciliation failed: each persisted ticket occurrence must have exactly one terminal event."
         )
 
     results.sort(key=lambda record: record["input_index"])
-    decisions.sort(key=lambda record: record["input_index"])
+    terminal_events.sort(key=lambda record: record["input_index"])
     if [result["input_index"] for result in results] != list(range(len(input_records))):
         raise RuntimeError(
             "Export reconciliation failed: result rows do not cover each input index once."
@@ -87,7 +139,7 @@ def write_run_exports(
             "error_code": result["error"]["code"],
             "message": result["error"]["message"],
         }
-        for result, decision in zip(results, decisions, strict=True)
+        for result, decision in zip(results, terminal_events, strict=True)
         if "error" in result
     ]
     route_counts = {route: 0 for route in ROUTE_VALUES}
@@ -117,7 +169,7 @@ def write_run_exports(
         input_records=input_records,
         input_path=input_path,
         source_ref=source_ref,
-        decision_events=decisions,
+        decision_events=terminal_events,
     )
     metrics = {
         "run_id": run_id,

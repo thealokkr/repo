@@ -125,7 +125,7 @@ The schema supports the requirements as follows:
 
 Useful grounding examples from the supplied data:
 
-- `DEV-0004` asks how to revert an earlier revision and labels `DOC-DEPLOY-002`; that article is titled “Rolling back a failed release.” A resolution-section passage is more useful and citable than returning only the article title.
+- `DEV-0004` asks how to revert an earlier revision and labels `DOC-DEPLOY-002`, titled “Rolling back a failed release.” The capstone metadata manifest marks that article expired, so retrieval must exclude its passages even though they are semantically close to the ticket. Use another ticket with a currently approved article for positive source-retrieval evidence; never relax the eligibility rule to satisfy this evaluation label.
 - `DEV-0003` concerns audit access and labels `DOC-SEC-003` while its route is escalation/protected. It demonstrates why retrieval and route policy must be separate: relevant evidence can accompany an escalation without authorizing an automatic reply.
 - The development ticket file has 500 records and the validation file has 80; these provide a way to measure retrieval behavior instead of assuming a schema or vector store is accurate.
 

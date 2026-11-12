@@ -4,80 +4,55 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "event_id",
-    "run_id",
-    "input_index",
-    "ticket_id",
-    "occurred_at",
-    "event_type",
-    "actor_type",
-    "action_taken",
-    "reason",
-    "result"
+    "event_id", "run_id", "ticket_occurrence_id", "input_index", "ticket_id",
+    "occurred_at", "event_type", "actor_type", "terminal"
   ],
   "properties": {
-    "event_id": {
-      "type": "string",
-      "pattern": "^[0-9a-f]{32}$"
-    },
-    "run_id": {
-      "type": "string",
-      "pattern": "^[0-9a-f]{32}$"
-    },
-    "input_index": {
-      "type": "integer",
-      "minimum": 0
-    },
-    "ticket_id": {
-      "type": "string",
-      "minLength": 1
-    },
-    "occurred_at": {
-      "type": "string",
-      "format": "date-time"
-    },
-    "event_type": {
-      "enum": [
-        "route_recommended",
-        "processing_error"
-      ]
-    },
-    "actor_type": {
-      "const": "system"
-    },
-    "action_taken": {
-      "enum": [
-        "draft_for_review",
-        "escalate",
-        "degrade"
-      ]
-    },
-    "reason": {
-      "type": "string",
-      "minLength": 1
+    "event_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "ticket_occurrence_id": {"type": "string", "minLength": 1},
+    "input_index": {"type": "integer", "minimum": 0},
+    "ticket_id": {"type": "string", "minLength": 1},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "event_type": {"enum": ["classification", "retrieval", "routing", "generation", "ticket_completed", "ticket_failed"]},
+    "actor_type": {"const": "system"},
+    "terminal": {"type": "boolean"},
+    "action_taken": {"enum": ["draft_for_review", "escalate", "degrade"]},
+    "reason": {"type": "string", "minLength": 1},
+    "stage_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "status", "value", "reason"],
+      "properties": {
+        "stage": {"enum": ["classification", "retrieval", "routing", "generation"]},
+        "status": {"type": "string", "minLength": 1},
+        "value": {"type": "object"},
+        "reason": {"type": "string", "minLength": 1}
+      }
     },
     "result": {
       "type": "object",
       "required": [
-        "run_id",
-        "input_index",
-        "ticket_id",
-        "channel",
-        "route",
-        "status",
-        "reason",
-        "draft_response",
-        "sources",
-        "classification",
-        "routing",
-        "processing_duration_seconds",
-        "draft_generation_request_duration_seconds",
-        "processing_latency_seconds",
-        "draft",
-        "handoff",
-        "guardrails",
-        "generation"
+        "run_id", "input_index", "ticket_id", "channel", "route", "status",
+        "reason", "draft_response", "sources", "classification", "routing",
+        "processing_duration_seconds", "draft_generation_request_duration_seconds",
+        "processing_latency_seconds", "draft", "handoff", "guardrails", "generation"
       ]
     }
-  }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "terminal": {"const": false},
+        "event_type": {"enum": ["classification", "retrieval", "routing", "generation"]}
+      },
+      "required": ["stage_result"],
+      "not": {"anyOf": [{"required": ["action_taken"]}, {"required": ["result"]}]}
+    },
+    {
+      "properties": {"terminal": {"const": true}, "event_type": {"enum": ["ticket_completed", "ticket_failed"]}},
+      "required": ["action_taken", "reason", "result"],
+      "not": {"required": ["stage_result"]}
+    }
+  ]
 }

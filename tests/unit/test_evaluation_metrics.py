@@ -124,7 +124,15 @@ def test_evaluate_completed_run_reports_reproducible_metrics_and_segments(
         input_records=[record],
         input_path=input_path,
         source_ref="data/tickets/development_tickets.json",
-        decision_events=[_decision(result)],
+        decision_events=[
+            {
+                "input_index": 0,
+                "ticket_id": "EVAL-1",
+                "terminal": False,
+                "event_type": "classification",
+            },
+            {**_decision(result), "terminal": True},
+        ],
     )
 
     assert report["source_set"] == "development"
@@ -299,7 +307,15 @@ def test_malformed_development_labels_fail_reconciliation_and_block_precision_pa
         input_records=[record],
         input_path=input_path,
         source_ref="data/tickets/development_tickets.json",
-        decision_events=[_decision(result)],
+        decision_events=[
+            {
+                "input_index": 0,
+                "ticket_id": "EVAL-1",
+                "terminal": False,
+                "event_type": "classification",
+            },
+            {**_decision(result), "terminal": True},
+        ],
     )
 
     assert report["integrity"]["status"] == "mismatch"

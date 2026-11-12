@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +13,7 @@ from cloudserve_support.evaluation.quality_judge import (
     QUALITY_JUDGE_SAMPLE_SIZE,
     QUALITY_JUDGE_SAMPLE_SEED,
     QualityJudgeError,
+    _decision_events_by_key,
     _build_quality_judge_scorecard,
     _validated_judgment_row,
     build_quality_judge_input,
@@ -266,6 +269,41 @@ def test_quality_scorecard_applies_targets_and_marks_partial_samples_incomplete(
     assert partial["response_quality_proxy"]["status"] == "incomplete"
     assert partial["citation_support_rate"]["status"] == "incomplete"
     assert partial["hallucination_estimate"]["missing_count"] == 1
+
+
+def test_quality_judge_reconciliation_ignores_nonterminal_stage_events(
+    tmp_path: Path,
+) -> None:
+    decision_log = tmp_path / "decision_log.jsonl"
+    rows = [
+        {
+            "run_id": "a" * 32,
+            "input_index": 0,
+            "ticket_id": "T-1",
+            "occurred_at": "2026-11-12T12:00:00Z",
+            "event_type": "classification",
+            "terminal": False,
+        },
+        {
+            "run_id": "a" * 32,
+            "input_index": 0,
+            "ticket_id": "T-1",
+            "occurred_at": "2026-11-12T12:00:01Z",
+            "event_type": "ticket_completed",
+            "terminal": True,
+        },
+    ]
+    decision_log.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+
+    events, cross_run_keys, ambiguous_keys = _decision_events_by_key(
+        decision_log, run_id="a" * 32
+    )
+
+    assert events == {(0, "T-1"): "2026-11-12T12:00:01Z"}
+    assert cross_run_keys == set()
+    assert ambiguous_keys == set()
 
 
 def test_quality_judge_model_setting_is_separate_from_operational_model() -> None:
