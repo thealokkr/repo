@@ -12,26 +12,12 @@ from cloudserve_support.classification.ticket_classification import INTENT_VALUE
 
 OUTPUT_SCHEMA_DIRECTORY = Path(__file__).resolve().parents[3] / "schemas" / "outputs"
 INTENT_SCHEMA = {"enum": sorted(INTENT_VALUES)}
-GENERATED_LABELS_SCHEMA = {
-    "oneOf": [
-        {"type": "null"},
-        {
-            "type": "object",
-            "additionalProperties": False,
-            "required": [
-                "intent", "urgency", "expected_route", "answerable_from_docs",
-                "expected_doc_ids", "must_not_auto_respond",
-            ],
-            "properties": {
-                "intent": INTENT_SCHEMA,
-                "urgency": {"enum": ["high", "medium", "low", "unknown"]},
-                "expected_route": {"enum": ["draft_for_review", "escalate", "degrade"]},
-                "answerable_from_docs": {"type": "boolean"},
-                "expected_doc_ids": {"type": "array", "items": {"type": "string"}},
-                "must_not_auto_respond": {"type": "boolean"},
-            },
-        },
-    ]
+URGENCY_SCHEMA = {"enum": ["high", "medium", "low", "unknown"]}
+EXPECTED_ROUTE_SCHEMA = {"enum": ["auto_respond", "draft_for_review", "escalate", "degrade"]}
+PREDICTED_ROUTE_SCHEMA = {"enum": ["draft_for_review", "escalate", "degrade"]}
+DOC_IDS_SCHEMA = {
+    "type": "array",
+    "items": {"type": "string", "minLength": 1, "pattern": r"\S"},
 }
 CALIBRATION_SOURCE_SCHEMA = {
     "type": "object",
@@ -628,41 +614,60 @@ EVALUATION_REPORT_SCHEMA = {
         "limitations": {"type": "array", "items": {"type": "string"}},
     },
 }
-CLASSIFICATION_SCHEMA = {
+RETRIEVAL_DIAGNOSTICS_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "required": [
-        "intent", "urgency", "confidence", "provider", "model_name", "provider_status",
+        "status", "reason_code", "reason", "eligible_candidate_count",
+        "excluded_candidate_counts", "minimum_similarity", "embedding_model",
+        "source_sha256", "metadata_manifest_sha256",
     ],
     "properties": {
-        "intent": INTENT_SCHEMA,
-        "urgency": {"enum": ["high", "medium", "low", "unknown"]},
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-        "provider": {"enum": ["openai", "not_attempted"]},
-        "model_name": {"type": "string", "minLength": 1},
-        "provider_status": {"enum": ["classified", "fallback"]},
+        "status": {"type": "string", "minLength": 1},
+        "reason_code": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1},
+        "eligible_candidate_count": {"type": "integer", "minimum": 0},
+        "excluded_candidate_counts": {
+            "type": "object",
+            "additionalProperties": {"type": "integer", "minimum": 0},
+        },
+        "minimum_similarity": {"type": "number", "minimum": 0, "maximum": 1},
+        "embedding_model": {"type": "string", "minLength": 1},
+        "source_sha256": {"type": ["string", "null"]},
+        "metadata_manifest_sha256": {"type": ["string", "null"]},
     },
 }
 ROUTING_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "required": [
-        "policy_version", "matched_rule", "protected_case", "evidence_ready",
+        "policy_version", "matched_rule",
         "confidence_threshold", "threshold_source", "calibration_method",
         "calibration_source", "policy_frozen", "policy_provenance", "retrieval",
     ],
     "properties": {
         "policy_version": {"type": "string", "minLength": 1},
         "matched_rule": {"type": "string", "minLength": 1},
-        "protected_case": {"type": "boolean"},
-        "evidence_ready": {"type": ["boolean", "null"]},
         "confidence_threshold": {"type": "number", "minimum": 0, "maximum": 1},
         "threshold_source": {"type": "string", "minLength": 1},
         "calibration_method": {"type": "string", "minLength": 1},
         "calibration_source": CALIBRATION_SOURCE_SCHEMA,
         "policy_frozen": {"const": True},
         "policy_provenance": POLICY_PROVENANCE_SCHEMA,
-        "retrieval": {"type": "object"},
+        "retrieval": RETRIEVAL_DIAGNOSTICS_SCHEMA,
+    },
+}
+SOURCE_EVIDENCE_SCHEMA = {
+    "type": "object",
+    "required": [
+        "passage_id", "doc_id", "similarity", "minimum_similarity", "source_ref",
+    ],
+    "properties": {
+        "passage_id": {"type": "string", "minLength": 1},
+        "doc_id": {"type": "string", "minLength": 1},
+        "similarity": {"type": "number", "minimum": 0, "maximum": 1},
+        "minimum_similarity": {"type": "number", "minimum": 0, "maximum": 1},
+        "source_ref": {"type": "string", "minLength": 1},
     },
 }
 DRAFT_SCHEMA = {
@@ -710,17 +715,14 @@ HANDOFF_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "required": [
-        "summary", "issue", "context", "sources", "attempted_steps", "uncertainties",
-        "reason", "owner", "next_action",
+        "summary", "issue", "attempted_steps", "uncertainties",
+        "owner", "next_action",
     ],
     "properties": {
         "summary": {"type": "string", "minLength": 1},
         "issue": {"type": "string", "minLength": 1},
-        "context": {"type": "object"},
-        "sources": {"type": "array", "items": {"type": "object"}},
         "attempted_steps": {"type": "array", "items": {"type": "string"}},
         "uncertainties": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-        "reason": {"type": "string", "minLength": 1},
         "owner": {"type": "string", "minLength": 1},
         "next_action": {"type": "string", "minLength": 1},
     },
@@ -766,32 +768,43 @@ OUTPUT_SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": "object",
         "additionalProperties": False,
         "required": [
-            "run_id", "input_index", "ticket_id", "channel", "route", "status",
+            "run_id", "input_index", "ticket_id", "channel", "subject", "body",
+            "expected_intent", "predicted_intent",
+            "expected_urgency", "predicted_urgency",
+            "expected_route", "predicted_route",
+            "expected_answerable_from_docs", "predicted_answerable_from_docs",
+            "expected_doc_ids", "predicted_doc_ids",
+            "expected_must_not_auto_respond", "predicted_must_not_auto_respond",
+            "status", "reason",
+            "classifier_confidence", "classifier_provider", "classifier_model", "classifier_status",
+            "routing", "sources", "draft", "handoff", "guardrails", "generation",
             "processing_duration_seconds", "draft_generation_request_duration_seconds",
             "processing_latency_seconds",
-            "reason", "draft_response", "draft", "generated_labels", "handoff",
-            "guardrails", "generation", "sources", "classification", "routing",
         ],
         "properties": {
             "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
             "input_index": {"type": "integer", "minimum": 0},
-            "processing_duration_seconds": {"type": "number", "minimum": 0},
-            "draft_generation_request_duration_seconds": {"type": "number", "minimum": 0},
-            "processing_latency_seconds": {"type": "number", "minimum": 0},
-            "ticket_id": {"type": "string", "minLength": 1},
-            "channel": {"type": "string", "minLength": 1},
-            "route": {"enum": ["draft_for_review", "escalate", "degrade"]},
+            "ticket_id": {"type": ["string", "null"], "minLength": 1},
+            "channel": {"type": ["string", "null"], "minLength": 1},
+            "subject": {"type": ["string", "null"]},
+            "body": {"type": ["string", "null"]},
+            "received_at": {"type": ["string", "null"], "minLength": 1},
+            "customer_tier": {"type": ["string", "null"], "minLength": 1},
+            "language_fluency": {"type": ["string", "null"], "minLength": 1},
+            "expected_intent": {"oneOf": [INTENT_SCHEMA, {"type": "null"}]},
+            "predicted_intent": {"oneOf": [INTENT_SCHEMA, {"type": "null"}]},
+            "expected_urgency": {"oneOf": [URGENCY_SCHEMA, {"type": "null"}]},
+            "predicted_urgency": {"oneOf": [URGENCY_SCHEMA, {"type": "null"}]},
+            "expected_route": {"oneOf": [EXPECTED_ROUTE_SCHEMA, {"type": "null"}]},
+            "predicted_route": {"oneOf": [PREDICTED_ROUTE_SCHEMA, {"type": "null"}]},
+            "expected_answerable_from_docs": {"type": ["boolean", "null"]},
+            "predicted_answerable_from_docs": {"type": ["boolean", "null"]},
+            "expected_doc_ids": {"oneOf": [DOC_IDS_SCHEMA, {"type": "null"}]},
+            "predicted_doc_ids": {"oneOf": [DOC_IDS_SCHEMA, {"type": "null"}]},
+            "expected_must_not_auto_respond": {"type": ["boolean", "null"]},
+            "predicted_must_not_auto_respond": {"type": ["boolean", "null"]},
             "status": {"enum": ["completed", "failed"]},
             "reason": {"type": "string", "minLength": 1},
-            "draft_response": {"type": ["string", "null"]},
-            "draft": {"oneOf": [DRAFT_SCHEMA, {"type": "null"}]},
-            "generated_labels": GENERATED_LABELS_SCHEMA,
-            "handoff": {"oneOf": [HANDOFF_SCHEMA, {"type": "null"}]},
-            "guardrails": GUARDRAILS_SCHEMA,
-            "generation": GENERATION_SCHEMA,
-            "sources": {"type": "array", "items": {"type": "object"}},
-            "classification": CLASSIFICATION_SCHEMA,
-            "routing": ROUTING_SCHEMA,
             "error": {
                 "type": "object",
                 "additionalProperties": False,
@@ -801,6 +814,19 @@ OUTPUT_SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
                     "message": {"type": "string", "minLength": 1},
                 },
             },
+            "classifier_confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+            "classifier_provider": {"enum": ["openai", "not_attempted"]},
+            "classifier_model": {"type": "string", "minLength": 1},
+            "classifier_status": {"enum": ["classified", "fallback"]},
+            "routing": ROUTING_SCHEMA,
+            "sources": {"type": "array", "items": SOURCE_EVIDENCE_SCHEMA},
+            "draft": {"oneOf": [DRAFT_SCHEMA, {"type": "null"}]},
+            "handoff": {"oneOf": [HANDOFF_SCHEMA, {"type": "null"}]},
+            "guardrails": GUARDRAILS_SCHEMA,
+            "generation": GENERATION_SCHEMA,
+            "processing_duration_seconds": {"type": "number", "minimum": 0},
+            "draft_generation_request_duration_seconds": {"type": "number", "minimum": 0},
+            "processing_latency_seconds": {"type": "number", "minimum": 0},
         },
         "allOf": [
             {
@@ -808,27 +834,103 @@ OUTPUT_SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
                     "required": ["status"],
                     "properties": {"status": {"const": "failed"}},
                 },
-                "then": {"required": ["error"]},
+                "then": {
+                    "required": ["error"],
+                    "properties": {
+                        "predicted_intent": {"type": "null"},
+                        "predicted_urgency": {"type": "null"},
+                        "predicted_route": {"type": "null"},
+                        "predicted_answerable_from_docs": {"type": "null"},
+                        "predicted_doc_ids": {"type": "null"},
+                        "predicted_must_not_auto_respond": {"type": "null"},
+                        "draft": {"type": "null"},
+                        "handoff": HANDOFF_SCHEMA,
+                    },
+                },
+                "else": {
+                    "not": {"required": ["error"]},
+                },
             },
             {
                 "if": {
-                    "properties": {"route": {"const": "draft_for_review"}},
-                    "required": ["route"],
+                    "required": ["classifier_status"],
+                    "properties": {"classifier_status": {"const": "classified"}},
+                },
+                "then": {
+                    "properties": {
+                        "classifier_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    },
+                },
+                "else": {
+                    "properties": {
+                        "classifier_confidence": {"type": "null"},
+                    },
+                },
+            },
+            {
+                "if": {
+                    "required": ["predicted_intent"],
+                    "properties": {"predicted_intent": {"type": "null"}},
+                },
+                "then": {
+                    "properties": {
+                        "predicted_urgency": {"type": "null"},
+                        "predicted_route": {"type": "null"},
+                        "predicted_answerable_from_docs": {"type": "null"},
+                        "predicted_doc_ids": {"type": "null"},
+                        "predicted_must_not_auto_respond": {"type": "null"},
+                    },
+                },
+                "else": {
+                    "properties": {
+                        "predicted_intent": INTENT_SCHEMA,
+                        "predicted_urgency": URGENCY_SCHEMA,
+                        "predicted_route": PREDICTED_ROUTE_SCHEMA,
+                        "predicted_answerable_from_docs": {"type": "boolean"},
+                        "predicted_doc_ids": DOC_IDS_SCHEMA,
+                        "predicted_must_not_auto_respond": {"type": "boolean"},
+                    },
+                },
+            },
+            {
+                "if": {
+                    "required": ["predicted_route"],
+                    "properties": {"predicted_route": {"const": "draft_for_review"}},
                 },
                 "then": {
                     "properties": {
                         "draft": DRAFT_SCHEMA,
-                        "draft_response": {"type": "string", "minLength": 1},
                         "handoff": {"type": "null"},
-                    }
+                    },
                 },
-                "else": {
+            },
+            {
+                "if": {
+                    "required": ["predicted_route"],
+                    "properties": {"predicted_route": {"enum": ["escalate", "degrade"]}},
+                },
+                "then": {
                     "properties": {
                         "draft": {"type": "null"},
-                        "draft_response": {"type": "null"},
                         "handoff": HANDOFF_SCHEMA,
-                    }
+                    },
                 },
+            },
+            {
+                "oneOf": [
+                    {
+                        "properties": {
+                            "draft": DRAFT_SCHEMA,
+                            "handoff": {"type": "null"},
+                        },
+                    },
+                    {
+                        "properties": {
+                            "draft": {"type": "null"},
+                            "handoff": HANDOFF_SCHEMA,
+                        },
+                    },
+                ],
             },
         ],
     },

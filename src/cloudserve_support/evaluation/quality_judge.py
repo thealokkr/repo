@@ -215,7 +215,7 @@ def select_quality_judge_sample(
         result
         for result in results
         if result.get("status") == "completed"
-        and result.get("route") == "draft_for_review"
+        and _result_route(result) == "draft_for_review"
         and isinstance(result.get("generation"), dict)
         and result["generation"].get("status") == "generated"
         and isinstance(result.get("draft"), dict)
@@ -321,7 +321,13 @@ def evaluate_quality_run(
                 if not isinstance(input_index, int) or isinstance(input_index, bool):
                     raise QualityJudgeError("quality_judge_input_error")
                 raw_ticket = input_by_index.get(input_index)
-                event_key = (input_index, ticket_id)
+                event_key = _resolve_decision_event_key(
+                    input_index=input_index,
+                    ticket_id=ticket_id,
+                    decisions_by_key=decisions_by_key,
+                    ambiguous_decision_keys=ambiguous_decision_keys,
+                    cross_run_decision_keys=cross_run_decision_keys,
+                )
                 if event_key in ambiguous_decision_keys:
                     raise QualityJudgeError("quality_judge_ambiguous_audit_record")
                 if event_key in cross_run_decision_keys:
@@ -525,7 +531,26 @@ def build_quality_judge_input(
 
 def _assert_judge_input_is_allow_listed(judge_input: dict[str, Any]) -> None:
     """Reject evaluation payloads that include history, labels, or operational decisions."""
-    forbidden_fields = {"labels", "history", "route", "classification", "urgency"}
+    forbidden_fields = {
+        "labels",
+        "history",
+        "route",
+        "classification",
+        "urgency",
+        "expected_intent",
+        "predicted_intent",
+        "expected_urgency",
+        "predicted_urgency",
+        "expected_route",
+        "predicted_route",
+        "expected_answerable_from_docs",
+        "predicted_answerable_from_docs",
+        "expected_doc_ids",
+        "predicted_doc_ids",
+        "expected_must_not_auto_respond",
+        "predicted_must_not_auto_respond",
+        "classifier_confidence",
+    }
     pending: list[Any] = [judge_input]
     while pending:
         value = pending.pop()
@@ -862,6 +887,38 @@ def _unique_references_by_ticket_id(
     }
 
 
+def _result_route(result: dict[str, Any]) -> Any:
+    """Read the terminal route from the flat export contract or a legacy result row."""
+    return result["predicted_route"] if "predicted_route" in result else result.get("route")
+
+
+def _resolve_decision_event_key(
+    *,
+    input_index: int,
+    ticket_id: Any,
+    decisions_by_key: dict[tuple[int, str], str],
+    ambiguous_decision_keys: set[tuple[int, str]],
+    cross_run_decision_keys: set[tuple[int, str]],
+) -> tuple[int, Any]:
+    """Match an exported result occurrence to its normalized terminal decision key."""
+    exact_key = (input_index, ticket_id)
+    if (
+        not isinstance(ticket_id, str)
+        or exact_key in decisions_by_key
+        or exact_key in ambiguous_decision_keys
+        or exact_key in cross_run_decision_keys
+    ):
+        return exact_key
+    stripped_key = (input_index, ticket_id.strip())
+    if (
+        stripped_key in decisions_by_key
+        or stripped_key in ambiguous_decision_keys
+        or stripped_key in cross_run_decision_keys
+    ):
+        return stripped_key
+    return exact_key
+
+
 def _selected_duplicate_ids(
     selected: Sequence[dict[str, Any]], results: Sequence[dict[str, Any]]
 ) -> set[str]:
@@ -871,7 +928,7 @@ def _selected_duplicate_ids(
         result.get("ticket_id")
         for result in results
         if result.get("status") == "completed"
-        and result.get("route") == "draft_for_review"
+        and _result_route(result) == "draft_for_review"
         and isinstance(result.get("generation"), dict)
         and result["generation"].get("status") == "generated"
     )

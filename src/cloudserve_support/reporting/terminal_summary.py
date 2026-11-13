@@ -11,6 +11,7 @@ from cloudserve_support.evaluation.run_metrics import (
 )
 
 ROUTE_ALIASES = {"auto_respond": "draft_for_review", "escalate": "escalate"}
+ROUTE_VALUES = frozenset({"draft_for_review", "escalate", "degrade"})
 EXPECTED_ROUTE_LABEL_VALUES = frozenset(
     {"auto_respond", "draft_for_review", "escalate", "degrade"}
 )
@@ -52,14 +53,41 @@ def build_terminal_summary(
             continue
         classification = result.get("classification")
         classification = classification if isinstance(classification, dict) else {}
-        predicted_intent = _value(classification.get("intent"), "unknown")
-        if predicted_intent not in INTENT_VALUES:
-            predicted_intent = "unknown"
-        predicted_urgency = _value(classification.get("urgency"), "unknown")
-        if predicted_urgency not in URGENCY_VALUES:
-            predicted_urgency = "unknown"
-        predicted_route = _value(result.get("route"), "unknown")
-        route_predicted[predicted_route] += 1
+        if "predicted_intent" in result:
+            raw_intent = result.get("predicted_intent")
+            predicted_intent: str | None = (
+                raw_intent
+                if isinstance(raw_intent, str) and raw_intent in INTENT_VALUES
+                else None
+            )
+        else:
+            predicted_intent = _value(classification.get("intent"), "unknown")
+            if predicted_intent not in INTENT_VALUES:
+                predicted_intent = "unknown"
+
+        if "predicted_urgency" in result:
+            raw_urgency = result.get("predicted_urgency")
+            predicted_urgency: str | None = (
+                raw_urgency
+                if isinstance(raw_urgency, str) and raw_urgency in URGENCY_VALUES
+                else None
+            )
+        else:
+            predicted_urgency = _value(classification.get("urgency"), "unknown")
+            if predicted_urgency not in URGENCY_VALUES:
+                predicted_urgency = "unknown"
+
+        if "predicted_route" in result:
+            raw_route = result.get("predicted_route")
+            predicted_route: str | None = (
+                raw_route
+                if isinstance(raw_route, str) and raw_route in ROUTE_VALUES
+                else None
+            )
+        else:
+            predicted_route = _value(result.get("route"), "unknown")
+        if predicted_route is not None:
+            route_predicted[predicted_route] += 1
 
         labels = record.get("labels")
         if not isinstance(labels, dict):
@@ -69,41 +97,61 @@ def build_terminal_summary(
         expected_route_raw = labels.get("expected_route")
         expected_route = ROUTE_ALIASES.get(expected_route_raw, expected_route_raw)
 
-        if isinstance(expected_intent, str) and expected_intent in INTENT_VALUES:
+        if (
+            predicted_intent is not None
+            and isinstance(expected_intent, str)
+            and expected_intent in INTENT_VALUES
+        ):
             intent_sample_count += 1
             if predicted_intent == expected_intent:
                 intent_correct_count += 1
-        if isinstance(expected_urgency, str) and expected_urgency in URGENCY_VALUES:
+        if (
+            predicted_urgency is not None
+            and isinstance(expected_urgency, str)
+            and expected_urgency in URGENCY_VALUES
+        ):
             urgency_sample_count += 1
             if predicted_urgency == expected_urgency:
                 urgency_correct_count += 1
-        if isinstance(expected_route_raw, str) and expected_route_raw in EXPECTED_ROUTE_LABEL_VALUES:
+        if (
+            predicted_route is not None
+            and isinstance(expected_route_raw, str)
+            and expected_route_raw in EXPECTED_ROUTE_LABEL_VALUES
+        ):
             label_counts["route"][expected_route] += 1
             label_totals["route"] += 1
             if predicted_route == expected_route:
                 label_matches["route"] += 1
 
         answerable = labels.get("answerable_from_docs")
-        if isinstance(answerable, bool):
-            answerability_labels[str(answerable).lower()] += 1
-            sources = result.get("sources")
-            evidence_ready = isinstance(sources, list) and any(
-                isinstance(source, dict) and isinstance(source.get("doc_id"), str)
-                for source in sources
-            )
-            answerability_proxy[str(evidence_ready).lower()] += 1
-            answerability_compared += 1
-            if answerable == evidence_ready:
-                answerability_agreements += 1
+        if type(answerable) is bool:
+            if "predicted_answerable_from_docs" in result:
+                raw_answerable = result.get("predicted_answerable_from_docs")
+                evidence_ready: bool | None = (
+                    raw_answerable if type(raw_answerable) is bool else None
+                )
+            else:
+                sources = result.get("sources")
+                evidence_ready = isinstance(sources, list) and any(
+                    isinstance(source, dict) and isinstance(source.get("doc_id"), str)
+                    for source in sources
+                )
+            if evidence_ready is not None:
+                answerability_labels[str(answerable).lower()] += 1
+                answerability_proxy[str(evidence_ready).lower()] += 1
+                answerability_compared += 1
+                if answerable == evidence_ready:
+                    answerability_agreements += 1
 
         if labels.get("must_not_auto_respond") is True:
             protected_count += 1
-            if predicted_route == "escalate":
-                protected_escalated += 1
-            else:
-                protected_route_deviations += 1
             if _automatic_send(result):
                 protected_auto_sends += 1
+            if predicted_route is not None:
+                if predicted_route == "escalate":
+                    protected_escalated += 1
+                else:
+                    protected_route_deviations += 1
 
     evaluation = metrics.get("evaluation")
     technical_metrics = (
@@ -134,15 +182,22 @@ def build_terminal_summary(
         and isinstance(classification_scorecard.get("accuracy"), dict)
         else {}
     )
+    has_authoritative_intent_metric = (
+        isinstance(accuracy_metric, dict) and "status" in accuracy_metric
+    )
     accuracy_value = accuracy_metric.get("value")
     if not isinstance(accuracy_value, (int, float)) or isinstance(accuracy_value, bool):
-        accuracy_value = intent_correct_count / intent_sample_count if intent_sample_count else None
+        accuracy_value = (
+            None
+            if has_authoritative_intent_metric
+            else (intent_correct_count / intent_sample_count if intent_sample_count else None)
+        )
     reported_correct_count = accuracy_metric.get("numerator")
     if not isinstance(reported_correct_count, int) or isinstance(reported_correct_count, bool):
-        reported_correct_count = intent_correct_count
+        reported_correct_count = 0 if has_authoritative_intent_metric else intent_correct_count
     reported_sample_count = accuracy_metric.get("denominator")
     if not isinstance(reported_sample_count, int) or isinstance(reported_sample_count, bool):
-        reported_sample_count = intent_sample_count
+        reported_sample_count = 0 if has_authoritative_intent_metric else intent_sample_count
     classification_target_status = (
         "invalid_evaluation_data"
         if isinstance(classification_scorecard, dict)
@@ -159,6 +214,9 @@ def build_terminal_summary(
         if isinstance(urgency_scorecard, dict)
         else None
     )
+    has_authoritative_urgency_metric = (
+        isinstance(urgency_match_metric, dict) and "status" in urgency_match_metric
+    )
     urgency_accuracy_value = (
         urgency_match_metric.get("value")
         if isinstance(urgency_match_metric, dict)
@@ -166,36 +224,87 @@ def build_terminal_summary(
     )
     if not isinstance(urgency_accuracy_value, (int, float)) or isinstance(urgency_accuracy_value, bool):
         urgency_accuracy_value = (
-            urgency_correct_count / urgency_sample_count if urgency_sample_count else None
+            None
+            if has_authoritative_urgency_metric
+            else (urgency_correct_count / urgency_sample_count if urgency_sample_count else None)
         )
     reported_urgency_correct_count = (
         urgency_match_metric.get("numerator")
         if isinstance(urgency_match_metric, dict)
-        else urgency_correct_count
+        else None
     )
     if not isinstance(reported_urgency_correct_count, int) or isinstance(reported_urgency_correct_count, bool):
-        reported_urgency_correct_count = urgency_correct_count
+        reported_urgency_correct_count = (
+            0 if has_authoritative_urgency_metric else urgency_correct_count
+        )
     reported_urgency_sample_count = (
         urgency_match_metric.get("denominator")
         if isinstance(urgency_match_metric, dict)
-        else urgency_sample_count
+        else None
     )
     if not isinstance(reported_urgency_sample_count, int) or isinstance(reported_urgency_sample_count, bool):
-        reported_urgency_sample_count = urgency_sample_count
+        reported_urgency_sample_count = (
+            0 if has_authoritative_urgency_metric else urgency_sample_count
+        )
 
     routes_from_metrics = metrics.get("route_counts")
     if isinstance(routes_from_metrics, dict):
         route_predicted = Counter({str(k): int(v) for k, v in routes_from_metrics.items()})
 
-    comparison = {
-        field: {
-            "matched": label_matches[field],
-            "mismatched": label_totals[field] - label_matches[field],
-            "denominator": label_totals[field],
-            "label_counts": dict(sorted(label_counts[field].items())),
+    route_accuracy_metric = (
+        technical_metrics.get("route_accuracy")
+        if isinstance(technical_metrics, dict)
+        and isinstance(technical_metrics.get("route_accuracy"), dict)
+        else None
+    )
+    reported_route_matches = (
+        route_accuracy_metric.get("numerator")
+        if isinstance(route_accuracy_metric, dict)
+        else None
+    )
+    reported_route_total = (
+        route_accuracy_metric.get("denominator")
+        if isinstance(route_accuracy_metric, dict)
+        else None
+    )
+    reported_route_expected_counts = (
+        route_scorecard.get("expected_counts")
+        if isinstance(route_scorecard, dict)
+        and isinstance(route_scorecard.get("expected_counts"), dict)
+        else None
+    )
+    has_authoritative_route_metric = (
+        isinstance(route_accuracy_metric, dict)
+        and "status" in route_accuracy_metric
+        and isinstance(reported_route_total, int)
+        and not isinstance(reported_route_total, bool)
+        and reported_route_expected_counts is not None
+    )
+    if has_authoritative_route_metric:
+        authoritative_route_matches = (
+            reported_route_matches
+            if isinstance(reported_route_matches, int)
+            and not isinstance(reported_route_matches, bool)
+            else 0
+        )
+        comparison = {
+            "route": {
+                "matched": authoritative_route_matches,
+                "mismatched": reported_route_total - authoritative_route_matches,
+                "denominator": reported_route_total,
+                "label_counts": dict(sorted(reported_route_expected_counts.items())),
+            }
         }
-        for field in ("route",)
-    }
+    else:
+        comparison = {
+            field: {
+                "matched": label_matches[field],
+                "mismatched": label_totals[field] - label_matches[field],
+                "denominator": label_totals[field],
+                "label_counts": dict(sorted(label_counts[field].items())),
+            }
+            for field in ("route",)
+        }
     return {
         "input_count": metrics.get("total_count", len(input_records)),
         "processed_count": len(results),

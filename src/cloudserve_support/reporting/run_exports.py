@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +38,20 @@ EXPECTED_ROUTE_ALIASES = {"auto_respond": "draft_for_review"}
 EXPECTED_ROUTE_LABEL_VALUES = frozenset(
     {"auto_respond", "draft_for_review", "escalate", "degrade"}
 )
+OPTIONAL_INPUT_METADATA_FIELDS = (
+    "received_at",
+    "customer_tier",
+    "language_fluency",
+)
+LABEL_PROJECTION_FIELDS = (
+    ("intent", "intent"),
+    ("urgency", "urgency"),
+    ("expected_route", "route"),
+    ("answerable_from_docs", "answerable_from_docs"),
+    ("expected_doc_ids", "doc_ids"),
+    ("must_not_auto_respond", "must_not_auto_respond"),
+)
+_UNPAIRED_SURROGATE_PATTERN = re.compile(r"[\ud800-\udfff]")
 
 
 def write_run_exports(
@@ -152,14 +167,6 @@ def write_run_exports(
         run_id=run_id,
         identity_by_occurrence=identity_by_occurrence,
     )
-    results = [
-        {
-            **result,
-            "generated_labels": label_comparisons[result["input_index"]]["generated_labels"],
-        }
-        for result in results
-    ]
-
     exceptions = [
         {
             "run_id": result["run_id"],
@@ -175,6 +182,15 @@ def write_run_exports(
     route_counts = {route: 0 for route in ROUTE_VALUES}
     for result in results:
         route_counts[result["route"]] += 1
+    exported_results = [
+        _project_diagnostic_result(
+            result,
+            input_record=input_records[result["input_index"]],
+            comparison=label_comparisons[result["input_index"]],
+        )
+        for result in results
+    ]
+    for result in exported_results:
         validate_output_record(
             result,
             schema_filename="result.schema.json",
@@ -217,11 +233,100 @@ def write_run_exports(
         schemas=schemas,
     )
 
-    _write_jsonl_atomic(output_directory / "results.jsonl", results)
+    _write_jsonl_atomic(output_directory / "results.jsonl", exported_results)
     _write_jsonl_atomic(output_directory / "decision_log.jsonl", decisions)
     _write_json_atomic(output_directory / "metrics.json", metrics)
     _write_jsonl_atomic(output_directory / "exceptions.jsonl", exceptions)
     return metrics
+
+
+def _project_diagnostic_result(
+    result: dict[str, Any],
+    *,
+    input_record: Any,
+    comparison: dict[str, Any],
+) -> dict[str, Any]:
+    """Project persisted outcomes and post-processing labels into one diagnostic row."""
+    raw = input_record if isinstance(input_record, dict) else {}
+    row: dict[str, Any] = {
+        "run_id": result["run_id"],
+        "input_index": result["input_index"],
+        "ticket_id": _preserve_nonempty_input_string(raw.get("ticket_id")),
+        "channel": _preserve_nonempty_input_string(raw.get("channel")),
+        "subject": raw["subject"] if isinstance(raw.get("subject"), str) else None,
+        "body": raw["body"] if isinstance(raw.get("body"), str) else None,
+    }
+    for field in OPTIONAL_INPUT_METADATA_FIELDS:
+        if field in raw:
+            row[field] = _preserve_nonempty_input_string(raw.get(field))
+
+    provided = comparison["provided_labels"] or {}
+    generated = comparison["generated_labels"]
+    for label_field, output_suffix in LABEL_PROJECTION_FIELDS:
+        expected_value = provided.get(label_field)
+        row[f"expected_{output_suffix}"] = (
+            list(expected_value)
+            if label_field == "expected_doc_ids"
+            and _valid_label_value(label_field, expected_value, generated=False)
+            else expected_value
+            if _valid_label_value(label_field, expected_value, generated=False)
+            else None
+        )
+        predicted_value = generated.get(label_field) if generated is not None else None
+        row[f"predicted_{output_suffix}"] = (
+            list(predicted_value)
+            if label_field == "expected_doc_ids"
+            and _valid_label_value(label_field, predicted_value, generated=True)
+            else predicted_value
+            if _valid_label_value(label_field, predicted_value, generated=True)
+            else None
+        )
+
+    row["status"] = result["status"]
+    row["reason"] = result["reason"]
+    if "error" in result:
+        row["error"] = result["error"]
+
+    classification = result["classification"]
+    row["classifier_confidence"] = (
+        classification["confidence"]
+        if classification["provider_status"] == "classified"
+        else None
+    )
+    row["classifier_provider"] = classification["provider"]
+    row["classifier_model"] = classification["model_name"]
+    row["classifier_status"] = classification["provider_status"]
+    row["routing"] = {
+        key: value
+        for key, value in result["routing"].items()
+        if key not in {"evidence_ready", "protected_case"}
+    }
+    row["sources"] = result["sources"]
+    row["draft"] = result["draft"]
+    handoff = result["handoff"]
+    row["handoff"] = (
+        {
+            key: value
+            for key, value in handoff.items()
+            if key not in {"context", "sources", "reason"}
+        }
+        if handoff is not None
+        else None
+    )
+    row["guardrails"] = result["guardrails"]
+    row["generation"] = result["generation"]
+    row["processing_duration_seconds"] = result["processing_duration_seconds"]
+    row["draft_generation_request_duration_seconds"] = result[
+        "draft_generation_request_duration_seconds"
+    ]
+    row["processing_latency_seconds"] = result["processing_latency_seconds"]
+    return row
+
+
+def _preserve_nonempty_input_string(value: Any) -> str | None:
+    """Keep a supplied non-empty string verbatim without coercing missing or non-string input."""
+    return value if isinstance(value, str) and value != "" else None
+
 
 
 def write_markdown_run_metrics(
@@ -464,11 +569,18 @@ def _format_elapsed_run_time(elapsed_seconds: float | None) -> str:
 
 def _write_jsonl_atomic(path: Path, records: list[dict[str, Any]]) -> None:
     """Write JSON Lines through a same-directory temporary file before replacing."""
-    serialized = "".join(
-        json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
-        for record in records
-    )
+    serialized = "".join(_serialize_jsonl_record(record) for record in records)
     _replace_file_atomically(path, serialized)
+
+
+def _serialize_jsonl_record(record: dict[str, Any]) -> str:
+    """Serialize one JSONL record as UTF-8-safe JSON while escaping unpaired surrogates."""
+    encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+    safe_json = _UNPAIRED_SURROGATE_PATTERN.sub(
+        lambda match: f"\\u{ord(match.group(0)):04x}",
+        encoded,
+    )
+    return safe_json + "\n"
 
 
 def _write_json_atomic(path: Path, record: dict[str, Any]) -> None:
