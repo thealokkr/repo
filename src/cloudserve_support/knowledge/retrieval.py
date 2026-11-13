@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import chromadb
-from openai import OpenAI
+from google import genai
 
 from cloudserve_support.config import Settings
 from cloudserve_support.domain.ticket import CanonicalTicket
@@ -31,7 +31,7 @@ DEFAULT_SOURCE_PATH = REPO_ROOT / "data" / "kb" / "documentation.json"
 DEFAULT_METADATA_PATH = REPO_ROOT / "data" / "kb" / "metadata_manifest.json"
 DEFAULT_INDEX_PATH = REPO_ROOT / "data" / "index"
 COLLECTION_NAME = "cloudserve_kb"
-EMBEDDING_DIMENSIONS = 1536
+EMBEDDING_DIMENSIONS = 768
 MINIMUM_SIMILARITY = 0.45
 MAXIMUM_SOURCES = 3
 QUERY_EMBEDDING_TIMEOUT_SECONDS = 15.0
@@ -128,7 +128,7 @@ class KnowledgeRetriever:
             )
             return
 
-        if self.embedding_client is None and not settings.openai_api_key:
+        if self.embedding_client is None and not settings.gemini_api_key:
             self.unavailable_reason = (
                 "query_embeddings_unavailable",
                 "Query embeddings are unavailable; no knowledge source was used.",
@@ -136,10 +136,8 @@ class KnowledgeRetriever:
             return
         if self.embedding_client is None:
             try:
-                self.embedding_client = OpenAI(
-                    api_key=settings.openai_api_key,
-                    timeout=QUERY_EMBEDDING_TIMEOUT_SECONDS,
-                    max_retries=QUERY_EMBEDDING_MAX_RETRIES,
+                self.embedding_client = genai.Client(
+                    api_key=settings.gemini_api_key,
                 )
             except Exception:
                 self.unavailable_reason = (
@@ -186,7 +184,7 @@ class KnowledgeRetriever:
             )
             or index_manifest.get("passage_records_sha256") != expected_passage_records_hash
             or index_manifest.get("chunker_version") != CHUNKER_VERSION
-            or index_manifest.get("embedding_provider") != "openai"
+            or index_manifest.get("embedding_provider") != "gemini"
             or index_manifest.get("embedding_model") != self.settings.embedding_model
             or index_manifest.get("embedding_dimensions") != EMBEDDING_DIMENSIONS
             or index_manifest.get("distance_metric") != "cosine"
@@ -252,11 +250,11 @@ class KnowledgeRetriever:
             )
 
         try:
-            response = self.embedding_client.embeddings.create(
+            query_embedding = _embed_query_vector(
+                self.embedding_client,
                 model=self.settings.embedding_model,
-                input=query_text,
+                query_text=query_text,
             )
-            query_embedding = response.data[0].embedding
             if len(query_embedding) != EMBEDDING_DIMENSIONS:
                 raise ValueError("Query embedding dimensions do not match the index.")
         except Exception as error:
@@ -330,9 +328,11 @@ class KnowledgeRetriever:
         for chunk_start in range(0, len(searchable), embedding_batch_size):
             chunk = searchable[chunk_start : chunk_start + embedding_batch_size]
             try:
-                response = self.embedding_client.embeddings.create(
+                chunk_texts = [text for _, text in chunk]
+                vectors_chunk = _embed_query_vectors(
+                    self.embedding_client,
                     model=self.settings.embedding_model,
-                    input=[query_text for _, query_text in chunk],
+                    query_texts=chunk_texts,
                 )
             except Exception as error:
                 reason_code = (
@@ -348,19 +348,9 @@ class KnowledgeRetriever:
                 for position, _ in chunk:
                     results[position] = self._empty_result("unavailable", reason_code, reason)
                 continue
-            try:
-                indexed_vectors = _parse_embedding_response(response, len(chunk))
-            except Exception:
-                for position, _ in chunk:
-                    results[position] = self._empty_result(
-                        "unavailable",
-                        "invalid_embedding_response",
-                        "Query embedding response was invalid; no knowledge source was used.",
-                    )
-                continue
 
             for local_position, (position, _) in enumerate(chunk):
-                vector = indexed_vectors[local_position]
+                vector = vectors_chunk[local_position]
                 if not _is_valid_embedding_vector(vector):
                     results[position] = self._empty_result(
                         "unavailable",
@@ -623,8 +613,77 @@ def _ticket_query_text(
     return query_text, None
 
 
+def _l2_normalize(vector: Sequence[float]) -> list[float]:
+    """Manually L2-normalize reduced-dimensional vectors; reject zero or non-finite norms."""
+    for x in vector:
+        if not isinstance(x, Real) or isinstance(x, bool) or not math.isfinite(float(x)):
+            raise ValueError("Embedding vector contains non-finite values.")
+    norm = math.sqrt(sum(float(x) * float(x) for x in vector))
+    if norm == 0.0 or not math.isfinite(norm):
+        raise ValueError("Embedding vector has zero or non-finite L2 norm.")
+    return [float(x / norm) for x in vector]
+
+
+def _embed_query_vector(
+    client: Any,
+    *,
+    model: str,
+    query_text: str,
+) -> list[float]:
+    """Create one normalized query vector using Gemini or test adapter."""
+    if hasattr(client, "models") and hasattr(client.models, "embed_content"):
+        from google.genai import types
+
+        response = client.models.embed_content(
+            model=model,
+            contents=query_text,
+            config=types.EmbedContentConfig(
+                task_type="RETRIEVAL_QUERY",
+                output_dimensionality=EMBEDDING_DIMENSIONS,
+            ),
+        )
+        if hasattr(response, "embeddings") and response.embeddings:
+            return _l2_normalize(response.embeddings[0].values)
+        if hasattr(response, "embedding") and response.embedding:
+            return _l2_normalize(response.embedding.values)
+        raise ValueError("Invalid embedding response.")
+    if hasattr(client, "embeddings") and hasattr(client.embeddings, "create"):
+        response = client.embeddings.create(model=model, input=query_text)
+        data = getattr(response, "data", None)
+        if data and len(data) > 0:
+            return getattr(data[0], "embedding")
+    raise ValueError("Unsupported embedding client.")
+
+
+def _embed_query_vectors(
+    client: Any,
+    *,
+    model: str,
+    query_texts: list[str],
+) -> list[list[float]]:
+    """Create batch normalized query vectors using Gemini or test adapter."""
+    if hasattr(client, "models") and hasattr(client.models, "embed_content"):
+        from google.genai import types
+
+        response = client.models.embed_content(
+            model=model,
+            contents=query_texts,
+            config=types.EmbedContentConfig(
+                task_type="RETRIEVAL_QUERY",
+                output_dimensionality=EMBEDDING_DIMENSIONS,
+            ),
+        )
+        if not hasattr(response, "embeddings") or len(response.embeddings) != len(query_texts):
+            raise ValueError("Embedding count mismatch.")
+        return [_l2_normalize(item.values) for item in response.embeddings]
+    if hasattr(client, "embeddings") and hasattr(client.embeddings, "create"):
+        response = client.embeddings.create(model=model, input=query_texts)
+        return _parse_embedding_response(response, len(query_texts))
+    raise ValueError("Unsupported embedding client.")
+
+
 def _parse_embedding_response(response: Any, expected_count: int) -> list[Any]:
-    """Map OpenAI embedding rows by strict response index, rejecting ambiguous chunks."""
+    """Map embedding rows by strict response index, rejecting ambiguous chunks."""
     data = getattr(response, "data", None)
     if not isinstance(data, list) or len(data) != expected_count:
         raise ValueError("Embedding response count does not match the request.")
@@ -648,7 +707,7 @@ def _parse_embedding_response(response: Any, expected_count: int) -> list[Any]:
 
 
 def _is_valid_embedding_vector(vector: Any) -> bool:
-    """Require a finite 1536-dimension numeric vector for the packaged Chroma index."""
+    """Require a finite 768-dimension numeric vector for the packaged Chroma index."""
     if not isinstance(vector, (list, tuple)) or len(vector) != EMBEDDING_DIMENSIONS:
         return False
     for value in vector:

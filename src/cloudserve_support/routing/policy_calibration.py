@@ -33,8 +33,8 @@ def calibrate_development_routing_policy(
 ) -> dict[str, Any]:
     """Use only normalized development ticket text to select a frozen confidence floor."""
     settings = settings or Settings.from_env()
-    settings.require_openai_api_key()
-    classifier_provider = "openai"
+    settings.require_gemini_api_key()
+    classifier_provider = "gemini"
     classifier_model = DECISIONS_CLASSIFIER_MODEL
     records = read_ticket_records(development_input_path)
     tickets: list[CanonicalTicket] = [
@@ -168,9 +168,9 @@ def validate_frozen_routing_policy(policy: dict[str, Any]) -> None:
     ):
         raise ValueError("Frozen routing policy must come from development operational data.")
     if (
-        policy["classifier_provider"] == "openai"
+        policy["classifier_provider"] == "gemini"
         and policy["classifier_model"] != DECISIONS_CLASSIFIER_MODEL
     ):
         raise ValueError(
-            "Frozen routing policy classifier must use the Decisions API model gpt-6-luna."
+            f"Frozen routing policy classifier must use the Decisions API model {DECISIONS_CLASSIFIER_MODEL}."
         )

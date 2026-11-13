@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-import openai
+from google import genai
 import pytest
 
 from cloudserve_support.classification.ticket_classification import (
@@ -30,7 +30,7 @@ def _policy() -> dict[str, object]:
         "classification_confidence_threshold": 0.75,
         "threshold_source": "development operational confidence distribution",
         "calibration_method": "test fixture",
-        "classifier_provider": "openai",
+        "classifier_provider": "gemini",
         "classifier_model": DECISIONS_CLASSIFIER_MODEL,
         "frozen": True,
         "calibration_source": {
@@ -57,7 +57,7 @@ def _classification(
         "intent": intent,
         "urgency": "medium",
         "confidence": confidence,
-        "provider": "openai",
+        "provider": "gemini",
         "model_name": DECISIONS_CLASSIFIER_MODEL,
         "provider_status": "classified",
     }
@@ -383,7 +383,7 @@ def test_development_calibration_ignores_fixture_labels_and_history(
             probabilities=probabilities,
         )
 
-    class FakeOpenAI:
+    class FakeGenAIClient:
         def __init__(self, **options: object) -> None:
             self.decisions = SimpleNamespace(create=self.create_decision)
 
@@ -392,14 +392,14 @@ def test_development_calibration_ignores_fixture_labels_and_history(
             observed_inputs.append(request["input"])
             return SimpleNamespace(
                 model=DECISIONS_CLASSIFIER_MODEL,
-                answers=[
-                    choice_answer("ticket_0_intent", "api", INTENT_VALUES),
-                    choice_answer("ticket_0_urgency", "medium", URGENCY_VALUES),
-                ],
+                answers={
+                    "ticket_0_intent": choice_answer("ticket_0_intent", "api", INTENT_VALUES),
+                    "ticket_0_urgency": choice_answer("ticket_0_urgency", "medium", URGENCY_VALUES),
+                },
             )
 
-    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
-    settings = Settings(openai_api_key="test-key")
+    monkeypatch.setattr(genai, "Client", FakeGenAIClient)
+    settings = Settings(gemini_api_key="test-key")
     first = calibrate_development_routing_policy(development_path, settings=settings)
 
     ticket["labels"] = {"intent": "different-label", "expected_route": "auto_respond"}
@@ -415,7 +415,7 @@ def test_development_calibration_ignores_fixture_labels_and_history(
     ]["operational_sha256"]
     assert first["calibration_source"]["evaluation_fields_used"] is False
     assert first["calibration_source"]["source_set"] == "development"
-    assert first["classifier_provider"] == "openai"
+    assert first["classifier_provider"] == "gemini"
     assert first["classifier_model"] == DECISIONS_CLASSIFIER_MODEL
     assert len(observed_inputs) == 2
     assert all("fixture-secret" not in value and "first_contact_resolution" not in value for value in observed_inputs)

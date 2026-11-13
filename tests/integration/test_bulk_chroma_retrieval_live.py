@@ -1,4 +1,4 @@
-"""Live acceptance checks for batched OpenAI embeddings and persistent Chroma queries."""
+"""Live acceptance checks for batched Gemini embeddings and persistent Chroma queries."""
 
 from __future__ import annotations
 
@@ -13,7 +13,8 @@ from typing import Any
 
 import pytest
 from dotenv import dotenv_values
-from openai import OpenAI
+from google import genai
+from google.genai import types
 
 from cloudserve_support.classification.ticket_classification import (
     DECISIONS_CLASSIFIER_MODEL,
@@ -43,10 +44,10 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEVELOPMENT_INPUT = REPOSITORY_ROOT / "data" / "tickets" / "development_tickets.json"
 
 
-class RecordingOpenAIEmbeddings:
+class RecordingGeminiEmbeddings:
     """Record live request sizes and sanitized failures without exposing request data."""
 
-    def __init__(self, client: OpenAI, *, fail_call_number: int | None = None) -> None:
+    def __init__(self, client: genai.Client, *, fail_call_number: int | None = None) -> None:
         self.client = client
         self.fail_call_number = fail_call_number
         self.calls: list[int] = []
@@ -58,20 +59,38 @@ class RecordingOpenAIEmbeddings:
         inputs = input if isinstance(input, list) else [input]
         self.calls.append(len(inputs))
         try:
-            if len(self.calls) == self.fail_call_number:
-                response = self.client.embeddings.create(
-                    model="cloudserve-invalid-embedding-model",
-                    input=input,
+            target_model = (
+                "cloudserve-invalid-embedding-model"
+                if len(self.calls) == self.fail_call_number
+                else model
+            )
+            if hasattr(self.client, "models") and hasattr(self.client.models, "embed_content"):
+                res = self.client.models.embed_content(
+                    model=target_model,
+                    contents=inputs,
+                    config=types.EmbedContentConfig(
+                        task_type="RETRIEVAL_QUERY",
+                        output_dimensionality=768,
+                    ),
                 )
+                data = []
+                for idx, item in enumerate(res.embeddings):
+                    values = item.values
+                    norm = math.sqrt(sum(float(x) * float(x) for x in values))
+                    normed = [float(x / norm) for x in values] if norm > 0 else values
+                    data.append(SimpleNamespace(index=idx, embedding=normed))
+                response = SimpleNamespace(data=data)
+            elif hasattr(self.client, "embeddings") and hasattr(self.client.embeddings, "create"):
+                response = self.client.embeddings.create(model=target_model, input=input)
             else:
-                response = self.client.embeddings.create(model=model, input=input)
+                raise ValueError("Unsupported embedding client.")
             try:
                 self._capture_vectors(inputs, response)
             except Exception:
                 pass
             return response
         except Exception as error:
-            self.diagnostics.append(_safe_failure_summary("openai_embeddings", error))
+            self.diagnostics.append(_safe_failure_summary("gemini_embeddings", error))
             raise
 
     def _capture_vectors(self, inputs: list[str], response: Any) -> None:
@@ -91,7 +110,7 @@ class RecordingOpenAIEmbeddings:
                 or index < 0
                 or index >= len(inputs)
                 or not isinstance(vector, (list, tuple))
-                or len(vector) != 1536
+                or len(vector) != 768
             ):
                 continue
             try:
@@ -167,9 +186,10 @@ class RecordingBulkRetriever:
 
 def _live_api_key() -> str:
     """Load the already configured live API key without exposing it in test output."""
-    key = dotenv_values(REPOSITORY_ROOT / ".env").get("OPENAI_API_KEY")
+    env = dotenv_values(REPOSITORY_ROOT / ".env")
+    key = env.get("GEMINI_API_KEY") or env.get("GOOGLE_API_KEY")
     if not isinstance(key, str) or not key.strip():
-        pytest.fail("Set OPENAI_API_KEY in the environment or ignored .env file before live acceptance.")
+        pytest.fail("Set GEMINI_API_KEY or GOOGLE_API_KEY in the environment or ignored .env file before live acceptance.")
     return key.strip()
 
 
@@ -190,12 +210,12 @@ def _safe_failure_summary(component: str, error: Exception) -> dict[str, str | i
 
 
 def _retrieval_diagnostics(
-    embeddings: RecordingOpenAIEmbeddings,
+    embeddings: RecordingGeminiEmbeddings,
     collection: RecordingPersistentCollection,
 ) -> dict[str, list[dict[str, str | int]]]:
-    """Summarize sanitized OpenAI and Chroma failures without request payloads."""
+    """Summarize sanitized Gemini and Chroma failures without request payloads."""
     return {
-        "openai_embeddings": list(embeddings.diagnostics),
+        "gemini_embeddings": list(embeddings.diagnostics),
         "chroma_query": list(collection.diagnostics),
     }
 
@@ -226,7 +246,7 @@ def _comparison_diagnostics(
     tickets: list[CanonicalTicket],
     serial_results: tuple[RetrievalResult, ...],
     batch_results: tuple[RetrievalResult, ...],
-    embeddings: RecordingOpenAIEmbeddings,
+    embeddings: RecordingGeminiEmbeddings,
 ) -> list[dict[str, Any]]:
     """Build per-ticket deltas and equality flags, then discard captured vectors."""
     serial_vectors = embeddings.response_vectors.get("serial", {})
@@ -292,12 +312,12 @@ def test_live_failure_diagnostics_exclude_exception_text_and_codes() -> None:
         code = "opaque-internal-code"
 
     summary = _safe_failure_summary(
-        "openai_embeddings",
+        "gemini_embeddings",
         SimulatedProviderError("request body and credential details"),
     )
 
     assert summary == {
-        "component": "openai_embeddings",
+        "component": "gemini_embeddings",
         "exception_class": "SimulatedProviderError",
         "http_status": 503,
     }
@@ -313,7 +333,7 @@ def test_live_embedding_capture_maps_response_indexes_without_retaining_queries(
                 rows = [
                     SimpleNamespace(
                         index=index,
-                        embedding=[float(index + 1)] * 1536,
+                        embedding=[float(index + 1)] * 768,
                     )
                     for index in reversed(range(len(inputs)))
                 ]
@@ -322,7 +342,7 @@ def test_live_embedding_capture_maps_response_indexes_without_retaining_queries(
         def __init__(self) -> None:
             self.embeddings = self.Embeddings()
 
-    recorder = RecordingOpenAIEmbeddings(FakeEmbeddingClient())  # type: ignore[arg-type]
+    recorder = RecordingGeminiEmbeddings(FakeEmbeddingClient())  # type: ignore[arg-type]
     inputs = ["subject 0\nbody 0", "subject 1\nbody 1"]
     recorder.capture_phase = "batched"
     recorder.create(model="offline-capture-test", input=inputs)
@@ -392,16 +412,12 @@ def _smoke_tickets() -> tuple[list[dict[str, Any]], list[CanonicalTicket]]:
 def _build_live_retriever(
     settings: Settings,
     *,
-    embedding_recorder: RecordingOpenAIEmbeddings | None = None,
+    embedding_recorder: RecordingGeminiEmbeddings | None = None,
     collection_recorder: RecordingPersistentCollection | None = None,
-) -> tuple[KnowledgeRetriever, RecordingOpenAIEmbeddings, RecordingPersistentCollection]:
-    """Use the real OpenAI client and packaged persistent Chroma collection."""
-    client = OpenAI(
-        api_key=settings.require_openai_api_key(),
-        timeout=15.0,
-        max_retries=0,
-    )
-    embeddings = embedding_recorder or RecordingOpenAIEmbeddings(client)
+) -> tuple[KnowledgeRetriever, RecordingGeminiEmbeddings, RecordingPersistentCollection]:
+    """Use the real Gemini client and packaged persistent Chroma collection."""
+    client = genai.Client(api_key=settings.require_gemini_api_key())
+    embeddings = embedding_recorder or RecordingGeminiEmbeddings(client)
     if collection_recorder is None:
         import chromadb
 
@@ -426,9 +442,9 @@ def _build_live_retriever(
 
 
 class EmbeddingClientAdapter:
-    """Expose a recording embeddings resource through the OpenAI client contract."""
+    """Expose a recording embeddings resource through the client contract."""
 
-    def __init__(self, embeddings: RecordingOpenAIEmbeddings) -> None:
+    def __init__(self, embeddings: RecordingGeminiEmbeddings) -> None:
         self.embeddings = embeddings
 
 
@@ -490,7 +506,7 @@ def test_live_result_comparison_allows_independent_score_deltas() -> None:
         "eligible_candidate_count": 1,
         "excluded_candidate_counts": {},
         "minimum_similarity": MINIMUM_SIMILARITY,
-        "embedding_model": "text-embedding-3-small",
+        "embedding_model": "gemini-embedding-001",
         "source_sha256": "source-hash",
         "metadata_manifest_sha256": "metadata-hash",
     }
@@ -506,7 +522,7 @@ def test_live_five_ticket_retrieval_smoke_matches_serial_and_commits_before_rout
 ) -> None:
     """Compare five live results and prove the CLI routes after retrieval commits."""
     api_key = _live_api_key()
-    monkeypatch.setenv("OPENAI_API_KEY", api_key)
+    monkeypatch.setenv("GEMINI_API_KEY", api_key)
     monkeypatch.setenv("DRAFT_GENERATION_PROVIDER", "OFFLINE")
     settings = Settings.from_env()
     operational_records, tickets = _smoke_tickets()
@@ -687,12 +703,12 @@ def test_live_five_ticket_retrieval_smoke_matches_serial_and_commits_before_rout
 def test_live_bulk_embedding_failure_is_chunk_local_and_later_chunks_continue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Let OpenAI reject one invalid-model chunk and verify later real chunks still work."""
-    monkeypatch.setenv("OPENAI_API_KEY", _live_api_key())
+    """Let Gemini reject one invalid-model chunk and verify later real chunks still work."""
+    monkeypatch.setenv("GEMINI_API_KEY", _live_api_key())
     settings = Settings.from_env()
     _, tickets = _smoke_tickets()
-    client = OpenAI(api_key=settings.require_openai_api_key(), timeout=15.0, max_retries=0)
-    embeddings = RecordingOpenAIEmbeddings(client, fail_call_number=2)
+    client = genai.Client(api_key=settings.require_gemini_api_key())
+    embeddings = RecordingGeminiEmbeddings(client, fail_call_number=2)
     retriever, _, _ = _build_live_retriever(settings, embedding_recorder=embeddings)
 
     results = retriever.retrieve_many(tickets, embedding_batch_size=2, query_batch_size=2)
@@ -711,7 +727,7 @@ def test_live_bulk_chroma_dimension_failure_is_chunk_local_and_later_chunks_cont
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Let persistent Chroma reject one malformed vector chunk, then continue querying."""
-    monkeypatch.setenv("OPENAI_API_KEY", _live_api_key())
+    monkeypatch.setenv("GEMINI_API_KEY", _live_api_key())
     settings = Settings.from_env()
     _, tickets = _smoke_tickets()
     import chromadb

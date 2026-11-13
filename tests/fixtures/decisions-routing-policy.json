@@ -4,8 +4,8 @@
   "classification_confidence_threshold": 0.65,
   "threshold_source": "test fixture",
   "calibration_method": "test fixture",
-  "classifier_provider": "openai",
-  "classifier_model": "gpt-6-luna",
+  "classifier_provider": "gemini",
+  "classifier_model": "gemini-decision-1",
   "frozen": true,
   "calibration_source": {
     "source_set": "development",

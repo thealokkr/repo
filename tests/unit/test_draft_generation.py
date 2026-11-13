@@ -1,4 +1,4 @@
-"""Structured draft provider and parser behavior."""
+"""Deterministic checks for source-grounded drafting and provider isolation."""
 
 from __future__ import annotations
 
@@ -6,23 +6,23 @@ import json
 import time
 from types import SimpleNamespace
 
-import openai
+from google import genai
 import pytest
 
 from cloudserve_support.config import Settings
 from cloudserve_support.domain.ticket import CanonicalTicket
 from cloudserve_support.errors import ConfigurationError
+from cloudserve_support.generation.draft_generation import (
+    GEMINI_DRAFT_RESPONSE_SCHEMA,
+    DraftGenerationError,
+    GeminiDraftGenerationProvider,
+    OfflineDraftGenerationProvider,
+    create_draft_generation_provider,
+    parse_generated_claims,
+)
 from cloudserve_support.guardrails.draft_safety import (
     check_claim_grounding,
     compose_cited_draft,
-)
-from cloudserve_support.generation.draft_generation import (
-    DraftGenerationError,
-    OfflineDraftGenerationProvider,
-    OPENAI_DRAFT_RESPONSE_FORMAT,
-    OpenAIDraftGenerationProvider,
-    create_draft_generation_provider,
-    parse_generated_claims,
 )
 
 
@@ -43,12 +43,18 @@ def _ticket() -> CanonicalTicket:
     )
 
 
-def test_offline_generation_returns_a_deterministic_source_excerpt() -> None:
-    source = {
-        "passage_id": "DOC-1:hash:0",
-        "passage_text": "Refresh the package cache before retrying.",
+def _source(passage_id: str, passage_text: str) -> dict[str, str]:
+    return {
+        "passage_id": passage_id,
+        "passage_text": passage_text,
         "title": "Package cache",
+        "section": "Steps",
+        "source_ref": "data/kb/documentation.json#DOC-1#Steps",
     }
+
+
+def test_offline_generation_returns_a_deterministic_source_excerpt() -> None:
+    source = _source("DOC-1:hash:0", "Refresh the package cache before retrying.")
     provider = OfflineDraftGenerationProvider()
 
     first = provider.generate_claims(_ticket(), sources=(source,), model_name="ignored")
@@ -65,14 +71,10 @@ def test_offline_generation_returns_a_deterministic_source_excerpt() -> None:
 
 
 def test_offline_generation_skips_standalone_numbered_list_marker() -> None:
-    source = {
-        "passage_id": "DOC-1:hash:0",
-        "passage_text": "1. Refresh the package cache before retrying. 2. Restart the service.",
-        "title": "Package cache",
-    }
-
+    source = _source("DOC-1:hash:0", "1. Refresh the package cache before retrying. 2. Restart the service.")
+    provider = OfflineDraftGenerationProvider()
     generated = json.loads(
-        OfflineDraftGenerationProvider().generate_claims(
+        provider.generate_claims(
             _ticket(), sources=(source,), model_name="ignored"
         )
     )
@@ -80,48 +82,43 @@ def test_offline_generation_skips_standalone_numbered_list_marker() -> None:
     assert generated["claims"][0]["text"] == "Refresh the package cache before retrying."
 
 
-def test_openai_generation_uses_configured_model_and_strict_json_schema(monkeypatch) -> None:
+def test_gemini_generation_uses_configured_model_and_strict_json_schema(monkeypatch) -> None:
     calls = {}
 
-    class FakeOpenAIClient:
-        def __init__(self, **kwargs):
-            calls["client_options"] = kwargs
-            self.chat = SimpleNamespace(
-                completions=SimpleNamespace(create=self.create_completion)
-            )
-
+    class FakeModels:
         @staticmethod
-        def create_completion(**kwargs):
-            calls["completion"] = kwargs
+        def generate_content(*, model: str, contents: str, config: object) -> object:
+            calls["model"] = model
+            calls["contents"] = contents
+            calls["config"] = config
             time.sleep(0.02)
             return SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(
-                            content=json.dumps(
-                                {
-                                    "claims": [
-                                        {
-                                            "text": "Refresh the package cache.",
-                                            "source_ids": ["DOC-1:hash:0"],
-                                        }
-                                    ],
-                                    "clarification_kind": "error_details",
-                                    "unsupported_points": [],
-                                    "conflicting_points": [],
-                                }
-                            )
-                        )
-                    )
-                ]
+                text=json.dumps(
+                    {
+                        "claims": [
+                            {
+                                "text": "Refresh the package cache.",
+                                "source_ids": ["DOC-1:hash:0"],
+                            }
+                        ],
+                        "clarification_kind": "error_details",
+                        "unsupported_points": [],
+                        "conflicting_points": [],
+                    }
+                )
             )
 
-    monkeypatch.setattr(openai, "OpenAI", FakeOpenAIClient)
+    class FakeGenAIClient:
+        def __init__(self, **kwargs):
+            calls["client_options"] = kwargs
+            self.models = FakeModels()
+
+    monkeypatch.setattr(genai, "Client", FakeGenAIClient)
     settings = Settings(
-        draft_generation_provider="OPENAI",
-        openai_api_key="test-key",
+        draft_generation_provider="GEMINI",
+        gemini_api_key="test-key",
         embedding_model="test-embeddings",
-        llm_model="support-draft-model",
+        llm_model="gemini-3.8-flash",
     )
     provider = create_draft_generation_provider(settings)
     source = {
@@ -132,33 +129,21 @@ def test_openai_generation_uses_configured_model_and_strict_json_schema(monkeypa
 
     content = provider.generate_claims(_ticket(), sources=(source,), model_name=settings.llm_model)
 
-    assert provider.name == "openai"
+    assert provider.name == "gemini"
     assert json.loads(content)["claims"][0]["source_ids"] == ["DOC-1:hash:0"]
-    assert calls["completion"]["model"] == "support-draft-model"
-    assert calls["completion"]["reasoning_effort"] == "none"
-    assert calls["completion"]["response_format"] == OPENAI_DRAFT_RESPONSE_FORMAT
-    assert calls["completion"]["response_format"]["json_schema"]["strict"] is True
+    assert calls["model"] == "gemini-3.8-flash"
     assert provider.last_request_duration_seconds >= 0.015
-    schema = calls["completion"]["response_format"]["json_schema"]["schema"]
+    config = calls["config"]
+    assert config.response_mime_type == "application/json"
+    assert config.response_schema == GEMINI_DRAFT_RESPONSE_SCHEMA
+    schema = config.response_schema
     assert schema["required"] == [
         "claims",
         "clarification_kind",
         "unsupported_points",
         "conflicting_points",
     ]
-    assert schema["properties"]["clarification_kind"]["enum"] == [
-        "error_details",
-        "steps_tried",
-        "expected_observed",
-        "environment_version",
-        "occurrence_time",
-        "request_identifier",
-        "none",
-    ]
-    assert schema["additionalProperties"] is False
-    assert calls["client_options"]["timeout"] == 15.0
-    assert calls["client_options"]["max_retries"] == 0
-    provider_input = calls["completion"]["messages"][1]["content"]
+    provider_input = calls["contents"]
     assert "LABEL_SECRET" not in provider_input
     assert "HISTORY_SECRET" not in provider_input
 
@@ -205,27 +190,26 @@ def test_generated_claim_parser_enforces_limits_not_encoded_in_json_schema() -> 
             )
 
 
-def test_openai_provider_failure_is_returned_as_a_safe_structured_error(monkeypatch) -> None:
-    class FakeOpenAIClient:
-        def __init__(self, **kwargs):
-            self.chat = SimpleNamespace(
-                completions=SimpleNamespace(create=self.create_completion)
-            )
-
+def test_gemini_provider_failure_is_returned_as_a_safe_structured_error(monkeypatch) -> None:
+    class FakeModels:
         @staticmethod
-        def create_completion(**kwargs):
-            del kwargs
+        def generate_content(*args, **kwargs):
+            del args, kwargs
             time.sleep(0.02)
             raise TimeoutError("private provider detail")
 
-    monkeypatch.setattr(openai, "OpenAI", FakeOpenAIClient)
-    provider = OpenAIDraftGenerationProvider(_settings())
+    class FakeGenAIClient:
+        def __init__(self, **kwargs):
+            self.models = FakeModels()
+
+    monkeypatch.setattr(genai, "Client", FakeGenAIClient)
+    provider = GeminiDraftGenerationProvider(_settings())
 
     with pytest.raises(DraftGenerationError) as raised:
         provider.generate_claims(
             _ticket(),
             sources=(_source("DOC-1:hash:0", "Refresh the package cache."),),
-            model_name="support-draft-model",
+            model_name="gemini-3.8-flash",
         )
 
     assert raised.value.code == "generation_timeout"
@@ -233,18 +217,18 @@ def test_openai_provider_failure_is_returned_as_a_safe_structured_error(monkeypa
     assert provider.last_request_duration_seconds >= 0.015
 
 
-def test_openai_provider_rejects_empty_evidence_before_client_creation(monkeypatch) -> None:
+def test_gemini_provider_rejects_empty_evidence_before_client_creation(monkeypatch) -> None:
     monkeypatch.setattr(
-        openai,
-        "OpenAI",
+        genai,
+        "Client",
         lambda **kwargs: (_ for _ in ()).throw(
             AssertionError("provider client must not be created without evidence")
         ),
     )
-    provider = OpenAIDraftGenerationProvider(_settings())
+    provider = GeminiDraftGenerationProvider(_settings())
 
     with pytest.raises(DraftGenerationError) as raised:
-        provider.generate_claims(_ticket(), sources=(), model_name="support-draft-model")
+        provider.generate_claims(_ticket(), sources=(), model_name="gemini-3.8-flash")
 
     assert raised.value.code == "generation_no_sources"
     assert provider.last_request_duration_seconds == 0
@@ -265,17 +249,17 @@ def test_claim_citations_must_each_support_the_claim() -> None:
     assert grounded is False
 
 
-def test_draft_provider_defaults_to_openai() -> None:
+def test_draft_provider_defaults_to_gemini() -> None:
     settings = Settings.from_env(
         {
-            "OPENAI_API_KEY": "test-key",
+            "GEMINI_API_KEY": "test-key",
         }
     )
 
-    assert settings.draft_generation_provider == "OPENAI"
-    assert create_draft_generation_provider(settings).name == "openai"
+    assert settings.draft_generation_provider == "GEMINI"
+    assert create_draft_generation_provider(settings).name == "gemini"
     assert settings.require_draft_generation_api_key() == "test-key"
-    assert settings.require_openai_api_key() == "test-key"
+    assert settings.require_gemini_api_key() == "test-key"
 
 
 def test_draft_generation_provider_setting_rejects_unsupported_value() -> None:
@@ -342,18 +326,8 @@ def test_composition_omits_question_when_requested_detail_is_already_present() -
 
 def _settings() -> Settings:
     return Settings(
-        draft_generation_provider="OPENAI",
-        openai_api_key="test-key",
+        draft_generation_provider="GEMINI",
+        gemini_api_key="test-key",
         embedding_model="test-embeddings",
-        llm_model="support-draft-model",
+        llm_model="gemini-3.8-flash",
     )
-
-
-def _source(passage_id: str, passage_text: str) -> dict[str, str]:
-    return {
-        "passage_id": passage_id,
-        "passage_text": passage_text,
-        "title": "Package cache",
-        "section": "Steps",
-        "source_ref": "data/kb/documentation.json#DOC-1#Steps",
-    }

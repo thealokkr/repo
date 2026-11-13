@@ -108,8 +108,8 @@ def run_ticket_batch(
     policy_file_fingerprint = fingerprint_policy_file(resolved_policy_path)
     classifier_implementation_fingerprint = fingerprint_classifier_implementation()
     settings = Settings.from_env()
-    if settings.openai_api_key and (
-        policy["classifier_provider"] != "openai"
+    if settings.gemini_api_key and (
+        policy["classifier_provider"] != "gemini"
         or policy["classifier_model"] != DECISIONS_CLASSIFIER_MODEL
     ):
         raise RuntimeError(

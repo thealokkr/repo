@@ -51,11 +51,12 @@ def test_live_run_persists_stage_checkpoints_before_routing(
     ticket_count: int,
 ) -> None:
     """Run the tracer through live Decisions, embeddings, Chroma, and drafting."""
-    api_key = dotenv_values(REPOSITORY_ROOT / ".env").get("OPENAI_API_KEY")
+    env = dotenv_values(REPOSITORY_ROOT / ".env")
+    api_key = env.get("GEMINI_API_KEY") or env.get("GOOGLE_API_KEY")
     if not isinstance(api_key, str) or not api_key.strip():
-        pytest.fail("Set OPENAI_API_KEY in the environment or ignored .env file.")
-    monkeypatch.setenv("OPENAI_API_KEY", api_key.strip())
-    monkeypatch.setenv("DRAFT_GENERATION_PROVIDER", "OPENAI")
+        pytest.fail("Set GEMINI_API_KEY or GOOGLE_API_KEY in the environment or ignored .env file.")
+    monkeypatch.setenv("GEMINI_API_KEY", api_key.strip())
+    monkeypatch.setenv("DRAFT_GENERATION_PROVIDER", "GEMINI")
     settings = Settings.from_env()
 
     source_bytes = DEVELOPMENT_INPUT.read_bytes()

@@ -42,8 +42,8 @@ def _result(*, input_index: int, ticket_id: str) -> dict[str, object]:
             "intent": "billing",
             "urgency": "medium",
             "confidence": 0.8,
-            "provider": "openai",
-            "model_name": "gpt-6-luna",
+            "provider": "gemini",
+            "model_name": "gemini-decision-1",
         },
         "sources": [source],
         "draft": {
@@ -139,7 +139,7 @@ def test_evaluate_completed_run_reports_reproducible_metrics_and_segments(
     assert report["integrity"]["status"] == "complete"
     assert report["input_sha256"]
     assert report["policy_provenance"]["policy"]["policy_version"] == "cs003-v1"
-    assert report["policy_provenance"]["classifier_model_names"] == ["gpt-6-luna"]
+    assert report["policy_provenance"]["classifier_model_names"] == ["gemini-decision-1"]
     assert report["policy_provenance"]["fingerprint_status"] == "available"
     assert report["policy_provenance"]["fingerprints"]["policy_file_sha256"] == "a" * 64
     observed = report["run_observed"]

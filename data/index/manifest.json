@@ -4,14 +4,14 @@
   "source_path": "data/kb/documentation.json",
   "source_sha256": "423c3fcdae9e589c0022ebe8121e01e56f92f40a9c1a3f8223727245bc8935fc",
   "metadata_manifest_path": "data/kb/metadata_manifest.json",
-  "metadata_manifest_sha256": "55cc7f9b16f4f853b0154c6c2f5b82784e6f317c8cbaaf77479f824a7e4ad9c0",
+  "metadata_manifest_sha256": "c2ed259d56d61b0a534dddfac1b3769447a57eaf31e3bdd10f6bd239b0f56542",
+  "passage_records_sha256": "a44e50c91c0d942c44ef4dbe3253e952e8bf3d1aa3cec38adb8713b2e92869aa",
   "chunker_version": "markdown-h2-v1",
-  "embedding_provider": "openai",
-  "embedding_model": "text-embedding-3-small",
-  "embedding_dimensions": 1536,
+  "embedding_provider": "gemini",
+  "embedding_model": "gemini-embedding-001",
+  "embedding_dimensions": 768,
   "distance_metric": "cosine",
-  "built_at_utc": "2026-11-10T06:27:41.287968+00:00",
+  "built_at_utc": "2026-11-13T16:21:59.458623+00:00",
   "article_count": 29,
-  "passage_count": 116,
-  "passage_records_sha256": "a44e50c91c0d942c44ef4dbe3253e952e8bf3d1aa3cec38adb8713b2e92869aa"
+  "passage_count": 116
 }

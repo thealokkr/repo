@@ -17,12 +17,15 @@ def test_clean_checkout_configuration_is_pinned_and_secret_safe() -> None:
 
     assert 'requires-python = ">=3.13,<3.15"' in pyproject
     assert lockfile.is_file()
-    assert "OPENAI_API_KEY=" in example
-    assert "OPENAI_API_KEY=sk-" not in example
+    assert "GEMINI_API_KEY=" in example
+    assert "GOOGLE_API_KEY=" in example
+    assert "GEMINI_API_KEY=AIza" not in example
+    assert "GOOGLE_API_KEY=AIza" not in example
     gate_instructions = readme.split("### Reproducible development and validation gates", 1)[1]
     gate_instructions = gate_instructions.split("\n### ", 1)[0]
     assert gate_instructions.count("uv run cloudserve run") == 2
-    assert "OPENAI_API_KEY=" not in gate_instructions
+    assert "GEMINI_API_KEY=" not in gate_instructions
+    assert "GOOGLE_API_KEY=" not in gate_instructions
     assert "cannot establish whether retrieval and citation-quality criteria pass" in gate_instructions
     assert "may incur provider charges" in gate_instructions
     assert "does not bypass packaged-index freshness checks" in gate_instructions

@@ -33,7 +33,7 @@ class _QueryEmbeddings:
         self.expected_query = expected_query
 
     def create(self, *, model: str, input: str) -> SimpleNamespace:
-        assert model == "text-embedding-3-small"
+        assert model == "gemini-embedding-001"
         assert input == self.expected_query
         return SimpleNamespace(
             data=[SimpleNamespace(embedding=[1.0, *([0.0] * (EMBEDDING_DIMENSIONS - 1))])]
@@ -47,7 +47,7 @@ class _StoredPassageEmbedding:
         self.vector = vector
 
     def create(self, *, model: str, input: str) -> SimpleNamespace:
-        assert model == "text-embedding-3-small"
+        assert model == "gemini-embedding-001"
         assert "labels" not in input
         return SimpleNamespace(data=[SimpleNamespace(embedding=self.vector)])
 
@@ -94,8 +94,8 @@ def test_normalized_ticket_returns_ranked_chroma_passages_from_packaged_source(
                 "metadata_manifest_sha256": metadata_sha256,
                 "passage_records_sha256": passage_records_sha256(records),
                 "chunker_version": CHUNKER_VERSION,
-                "embedding_provider": "openai",
-                "embedding_model": "text-embedding-3-small",
+                "embedding_provider": "gemini",
+                "embedding_model": "gemini-embedding-001",
                 "embedding_dimensions": EMBEDDING_DIMENSIONS,
                 "distance_metric": "cosine",
                 "passage_count": len(records),
@@ -145,9 +145,9 @@ def test_normalized_ticket_returns_ranked_chroma_passages_from_packaged_source(
     query_text = f"{ticket.subject}\n{ticket.body}"
     retriever = KnowledgeRetriever(
         Settings(
-            openai_api_key="test-key",
-            embedding_model="text-embedding-3-small",
-            llm_model="gpt-6-luna",
+            gemini_api_key="test-key",
+            embedding_model="gemini-embedding-001",
+            llm_model="gemini-3.8-flash",
         ),
         source_path=source_path,
         metadata_path=metadata_path,
@@ -199,9 +199,9 @@ def test_packaged_index_returns_current_source_ids_without_embedding_service() -
     stored = collection.get(ids=[target["id"]], include=["embeddings"])
     retriever = KnowledgeRetriever(
         Settings(
-            openai_api_key="test-key",
-            embedding_model="text-embedding-3-small",
-            llm_model="gpt-6-luna",
+            gemini_api_key="test-key",
+            embedding_model="gemini-embedding-001",
+            llm_model="gemini-3.8-flash",
         ),
         source_path=source_path,
         metadata_path=metadata_path,

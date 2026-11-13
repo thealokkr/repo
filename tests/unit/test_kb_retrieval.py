@@ -56,7 +56,7 @@ class _FakeEmbeddings:
     """Return one fixed-dimension query vector without calling a provider."""
 
     def create(self, *, model: str, input: str | list[str]) -> SimpleNamespace:
-        assert model == "text-embedding-3-small"
+        assert model == "gemini-embedding-001"
         inputs = input if isinstance(input, list) else [input]
         assert all("labels" not in text for text in inputs)
         return SimpleNamespace(
@@ -75,7 +75,7 @@ class _TimeoutOnceEmbeddings:
 
     def create(self, *, model: str, input: str | list[str]) -> SimpleNamespace:
         self.calls += 1
-        assert model == "text-embedding-3-small"
+        assert model == "gemini-embedding-001"
         inputs = input if isinstance(input, list) else [input]
         assert all("labels" not in text for text in inputs)
         if self.calls == 1:
@@ -97,7 +97,7 @@ class _IndexedBatchEmbeddings:
         self.embeddings = self
 
     def create(self, *, model: str, input: str | list[str]) -> SimpleNamespace:
-        assert model == "text-embedding-3-small"
+        assert model == "gemini-embedding-001"
         assert isinstance(input, list)
         self.calls.append(input)
         assert all("labels" not in text and "history" not in text for text in input)
@@ -248,7 +248,7 @@ def _retriever(
     collection_records: list[dict[str, Any]] | None = None,
     embedding_client: Any | None = None,
     collection: Any | None = None,
-    use_openai_client: bool = False,
+    use_gemini_client: bool = False,
 ) -> KnowledgeRetriever:
     """Create a test retriever with a source-matched manifest and fake dependencies."""
     expected_records, source_sha256, metadata_sha256, _ = _source_records()
@@ -266,8 +266,8 @@ def _retriever(
                 "metadata_manifest_sha256": index_metadata_sha256 or metadata_sha256,
                 "passage_records_sha256": passage_records_sha256(expected_records),
                 "chunker_version": "markdown-h2-v1",
-                "embedding_provider": "openai",
-                "embedding_model": "text-embedding-3-small",
+                "embedding_provider": "gemini",
+                "embedding_model": "gemini-embedding-001",
                 "embedding_dimensions": EMBEDDING_DIMENSIONS,
                 "distance_metric": "cosine",
                 "passage_count": len(expected_records),
@@ -277,11 +277,11 @@ def _retriever(
         encoding="utf-8",
     )
     settings = Settings(
-        openai_api_key="test-key",
-        embedding_model="text-embedding-3-small",
-        llm_model="gpt-6-luna",
+        gemini_api_key="test-key",
+        embedding_model="gemini-embedding-001",
+        llm_model="gemini-3.8-flash",
     )
-    if use_openai_client:
+    if use_gemini_client:
         fake_embedding_client = None
     elif embedding_client is None:
         fake_embedding_client = SimpleNamespace(embeddings=_FakeEmbeddings())
@@ -390,7 +390,7 @@ def test_missing_or_malformed_governance_metadata_is_rejected(
 
     def assert_runtime_has_no_eligible_source(metadata_path: Path, index: int) -> None:
         retriever = KnowledgeRetriever(
-            Settings(embedding_model="text-embedding-3-small"),
+            Settings(embedding_model="gemini-embedding-001"),
             metadata_path=metadata_path,
             index_path=tmp_path / f"missing-index-{index}",
             collection=_FakeCollection([], {}),
@@ -553,7 +553,7 @@ def test_stale_review_and_unavailable_index_return_no_sources(tmp_path: Path) ->
     assert stale.excluded_candidate_counts["review_expired"] == 108
 
     unavailable = KnowledgeRetriever(
-        Settings(embedding_model="text-embedding-3-small"),
+        Settings(embedding_model="gemini-embedding-001"),
         index_path=tmp_path / "missing-index",
     ).retrieve(_ticket())
     assert unavailable.status == "unavailable"
@@ -708,7 +708,7 @@ def test_retrieve_many_matches_serial_for_ticket_specific_deterministic_vectors(
             self.calls: list[list[str]] = []
 
         def create(self, *, model: str, input: str | list[str]) -> SimpleNamespace:
-            assert model == "text-embedding-3-small"
+            assert model == "gemini-embedding-001"
             inputs = [input] if isinstance(input, str) else input
             self.calls.append(inputs)
             rows = []
@@ -1024,33 +1024,121 @@ def test_retrieve_many_validates_batch_sizes_and_empty_input_before_provider_cal
     assert collection.calls == []
 
 
-def test_openai_query_embedding_client_uses_bounded_timeout_and_no_retries(
+def test_gemini_query_embedding_client_uses_bounded_timeout_and_no_retries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     records, _, _, _ = _source_records()
     options: dict[str, Any] = {}
 
-    class _OpenAIClient:
+    class _GenAIClient:
         def __init__(self, **client_options: Any) -> None:
             options.update(client_options)
             self.embeddings = _FakeEmbeddings()
 
-    monkeypatch.setattr(retrieval_module, "OpenAI", _OpenAIClient)
+    monkeypatch.setattr(retrieval_module.genai, "Client", _GenAIClient)
     _retriever(
         tmp_path,
         records,
         {record["id"]: 0.9 for record in records},
-        use_openai_client=True,
+        use_gemini_client=True,
     )
 
     assert options == {
         "api_key": "test-key",
-        "timeout": QUERY_EMBEDDING_TIMEOUT_SECONDS,
-        "max_retries": QUERY_EMBEDDING_MAX_RETRIES,
     }
-    assert QUERY_EMBEDDING_TIMEOUT_SECONDS == 15.0
-    assert QUERY_EMBEDDING_MAX_RETRIES == 0
+
+
+def test_l2_normalize_rejects_zero_and_non_finite_norms() -> None:
+    """Ensure _l2_normalize refuses to normalize zero or non-finite vectors."""
+    with pytest.raises(ValueError, match="zero or non-finite L2 norm"):
+        retrieval_module._l2_normalize([0.0] * EMBEDDING_DIMENSIONS)
+    with pytest.raises(ValueError, match="non-finite"):
+        retrieval_module._l2_normalize([float("nan")] * EMBEDDING_DIMENSIONS)
+    with pytest.raises(ValueError, match="non-finite"):
+        retrieval_module._l2_normalize([float("inf")] * EMBEDDING_DIMENSIONS)
+
+
+@pytest.mark.parametrize(
+    "invalid_vector",
+    [
+        [0.0] * EMBEDDING_DIMENSIONS,
+        [float("nan")] * EMBEDDING_DIMENSIONS,
+        [float("inf")] * EMBEDDING_DIMENSIONS,
+    ],
+)
+def test_gemini_query_embedding_invalid_norm_returns_safe_unavailable(
+    tmp_path: Path,
+    invalid_vector: list[float],
+) -> None:
+    records, _, _, _ = _source_records()
+
+    class _InvalidGeminiClient:
+        class Models:
+            @staticmethod
+            def embed_content(*args: Any, **kwargs: Any) -> Any:
+                return SimpleNamespace(
+                    embeddings=[SimpleNamespace(values=invalid_vector)]
+                )
+
+        models = Models()
+
+    retriever = _retriever(
+        tmp_path,
+        records,
+        {record["id"]: 0.1 for record in records},
+        embedding_client=_InvalidGeminiClient(),
+    )
+
+    result = retriever.retrieve(_ticket())
+
+    assert result.status == "unavailable"
+    assert result.reason_code == "retrieval_provider_or_index_error"
+    assert result.sources == ()
+    assert result.evidence_ready is False
+
+
+@pytest.mark.parametrize(
+    "invalid_vector",
+    [
+        [0.0] * EMBEDDING_DIMENSIONS,
+        [float("nan")] * EMBEDDING_DIMENSIONS,
+    ],
+)
+def test_gemini_batch_embedding_invalid_norm_degrades_chunk_safely(
+    tmp_path: Path,
+    invalid_vector: list[float],
+) -> None:
+    records, _, _, _ = _source_records()
+
+    class _InvalidBatchGeminiClient:
+        class Models:
+            @staticmethod
+            def embed_content(*args: Any, **kwargs: Any) -> Any:
+                contents = kwargs.get("contents", [])
+                return SimpleNamespace(
+                    embeddings=[
+                        SimpleNamespace(values=invalid_vector) for _ in contents
+                    ]
+                )
+
+        models = Models()
+
+    retriever = _retriever(
+        tmp_path,
+        records,
+        {record["id"]: 0.1 for record in records},
+        embedding_client=_InvalidBatchGeminiClient(),
+    )
+
+    results = retriever.retrieve_many([_ticket(), _ticket()], embedding_batch_size=2)
+
+    assert len(results) == 2
+    for result in results:
+        assert result.status == "unavailable"
+        assert result.reason_code == "retrieval_provider_or_index_error"
+        assert result.sources == ()
+        assert result.evidence_ready is False
 
 
 def test_query_embedding_timeout_returns_safe_unavailable(
@@ -1109,7 +1197,7 @@ def test_batch_escalates_after_query_embedding_timeout_and_processes_later_ticke
         "cloudserve_support.reporting.output_schemas.OUTPUT_SCHEMA_DIRECTORY",
         schema_directory,
     )
-    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("GEMINI_API_KEY", "")
     monkeypatch.setenv("DRAFT_GENERATION_PROVIDER", "OFFLINE")
     monkeypatch.setattr(
         "cloudserve_support.processing.run_tickets.classify_ticket_batches",
@@ -1121,7 +1209,7 @@ def test_batch_escalates_after_query_embedding_timeout_and_processes_later_ticke
                         intent="deployment_failure",
                         urgency="medium",
                         confidence=0.95,
-                        provider="openai",
+                        provider="gemini",
                         model_name=DECISIONS_CLASSIFIER_MODEL,
                         provider_status="classified",
                     )

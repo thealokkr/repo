@@ -119,7 +119,7 @@ def _prepare_run_artifacts(
     *,
     ticket_count: int = 20,
 ) -> tuple[Path, Path, list[dict[str, Any]]]:
-    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("GEMINI_API_KEY", "")
     records = [
         {
             "ticket_id": f"JUDGE-{index:04d}",
@@ -152,6 +152,7 @@ def _prepare_run_artifacts(
             f"PASSAGE-{result['input_index']}", event_time.date().isoformat()
         )
         result["route"] = "draft_for_review"
+        result["predicted_route"] = "draft_for_review"
         result["generation"] = {"status": "generated", "provider": "offline", "model_name": "test"}
         result["draft"] = {
             "plain_text": "API tokens can be rotated from the security settings page.",
@@ -312,6 +313,7 @@ def test_quality_judge_rejects_cross_run_or_ambiguous_decision_event(
         for event in decisions
         if event["input_index"] == sampled_result["input_index"]
         and event["ticket_id"] == sampled_result["ticket_id"]
+        and event.get("terminal") is True
     )
     if event_problem == "cross_run":
         matching_event["run_id"] = "f" * 32

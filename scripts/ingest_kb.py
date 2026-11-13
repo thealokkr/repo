@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,7 +11,8 @@ from typing import Any
 
 import chromadb
 from dotenv import load_dotenv
-from openai import OpenAI
+from google import genai
+from google.genai import types
 
 from cloudserve_support.knowledge.kb_source import (
     CHUNKER_VERSION,
@@ -34,24 +36,49 @@ COLLECTION_METADATA = {
     "schema_version": 1,
     "purpose": "CloudServe approved KB passage retrieval",
 }
-DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIMENSIONS = 1536
+DEFAULT_EMBEDDING_MODEL = "gemini-embedding-001"
+EMBEDDING_DIMENSIONS = 768
 EMBEDDING_BATCH_SIZE = 100
+
+
 def embed_kb_passages(
-    openai_client: OpenAI,
+    client: genai.Client,
     documents: list[str],
     embedding_model: str,
 ) -> list[list[float]]:
-    """Create OpenAI embeddings for passage text using one pinned model in bounded batches."""
+    """Create Gemini embeddings for passage text using one pinned model in bounded batches."""
     embeddings: list[list[float]] = []
     for start in range(0, len(documents), EMBEDDING_BATCH_SIZE):
         batch = documents[start : start + EMBEDDING_BATCH_SIZE]
-        response = openai_client.embeddings.create(model=embedding_model, input=batch)
-        embeddings.extend(item.embedding for item in sorted(response.data, key=lambda item: item.index))
+        response = client.models.embed_content(
+            model=embedding_model,
+            contents=batch,
+            config=types.EmbedContentConfig(
+                task_type="RETRIEVAL_DOCUMENT",
+                output_dimensionality=EMBEDDING_DIMENSIONS,
+            ),
+        )
+        if not response.embeddings or len(response.embeddings) != len(batch):
+            raise RuntimeError(
+                f"Gemini embedding count mismatch: received "
+                f"{len(response.embeddings) if response.embeddings else 0} vectors "
+                f"for {len(batch)} passages."
+            )
+        for item in response.embeddings:
+            values = item.values
+            if not values or len(values) != EMBEDDING_DIMENSIONS:
+                raise RuntimeError(
+                    f"Expected {EMBEDDING_DIMENSIONS}-dimension embeddings; received {len(values) if values else 0}."
+                )
+            # Reduced-dimensional vectors must be manually L2-normalized.
+            norm = math.sqrt(sum(float(x) * float(x) for x in values))
+            if norm == 0.0 or not math.isfinite(norm):
+                raise RuntimeError("Non-finite or zero L2 norm in embedding vector.")
+            embeddings.append([float(x / norm) for x in values])
 
     if len(embeddings) != len(documents):
         raise RuntimeError(
-            f"OpenAI embedding count mismatch: received {len(embeddings)} vectors "
+            f"Gemini embedding count mismatch: received {len(embeddings)} vectors "
             f"for {len(documents)} passages."
         )
     dimensions = {len(embedding) for embedding in embeddings}
@@ -104,7 +131,7 @@ def write_index_manifest(
         "metadata_manifest_sha256": metadata_manifest_sha256,
         "passage_records_sha256": passage_records_hash,
         "chunker_version": CHUNKER_VERSION,
-        "embedding_provider": "openai",
+        "embedding_provider": "gemini",
         "embedding_model": embedding_model,
         "embedding_dimensions": EMBEDDING_DIMENSIONS,
         "distance_metric": "cosine",
@@ -124,9 +151,10 @@ def ingest_kb_articles(
     metadata_path: Path = DEFAULT_METADATA_PATH,
 ) -> None:
     """Embed and upsert every KB passage, remove stale records, and write the build manifest."""
-    if not os.environ.get("OPENAI_API_KEY"):
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
         raise RuntimeError(
-            "OPENAI_API_KEY is not set. Add it to .env and run with `uv run --env-file .env`."
+            "GEMINI_API_KEY or GOOGLE_API_KEY is not set. Add it to .env and run with `uv run --env-file .env`."
         )
 
     articles, source_sha256 = load_kb_articles(source_path)
@@ -143,7 +171,8 @@ def ingest_kb_articles(
     )
     records_hash = passage_records_sha256(records)
     documents = [record["document"] for record in records]
-    embeddings = embed_kb_passages(OpenAI(), documents, embedding_model)
+    client = genai.Client(api_key=api_key)
+    embeddings = embed_kb_passages(client, documents, embedding_model)
     collection = create_kb_collection(index_path / "chroma")
 
     existing_ids = set(collection.get(include=[])["ids"])
@@ -188,7 +217,7 @@ def main() -> None:
         index_path=DEFAULT_INDEX_PATH,
         metadata_path=DEFAULT_METADATA_PATH,
         embedding_model=os.environ.get(
-            "OPENAI_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL
+            "GEMINI_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL
         ),
     )
 

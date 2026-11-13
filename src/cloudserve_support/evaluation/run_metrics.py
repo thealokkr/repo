@@ -1143,19 +1143,39 @@ def _single_policy_provenance(results: list[dict[str, Any]]) -> dict[str, Any]:
         "sample_size": len(provenances),
         "classifier_providers": sorted(
             {
-                classification.get("provider")
+                provider
                 for result in results
-                if isinstance((classification := result.get("classification")), dict)
-                and classification.get("provider") == "openai"
+                if (
+                    provider := (
+                        result.get("classifier_provider")
+                        if isinstance(result.get("classifier_provider"), str)
+                        else (
+                            result.get("classification", {}).get("provider")
+                            if isinstance(result.get("classification"), dict)
+                            else None
+                        )
+                    )
+                )
+                and provider == "gemini"
             }
         ),
         "classifier_model_names": sorted(
             {
-                classification.get("model_name")
+                model_name
                 for result in results
-                if isinstance((classification := result.get("classification")), dict)
-                and isinstance(classification.get("model_name"), str)
-                and classification.get("model_name")
+                if (
+                    model_name := (
+                        result.get("classifier_model")
+                        if isinstance(result.get("classifier_model"), str)
+                        else (
+                            result.get("classification", {}).get("model_name")
+                            if isinstance(result.get("classification"), dict)
+                            else None
+                        )
+                    )
+                )
+                and isinstance(model_name, str)
+                and model_name
             }
         ),
     }

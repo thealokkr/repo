@@ -1,7 +1,7 @@
 {
   "calibration_method": "20th percentile nearest rank, clamped to [0.65, 0.98]",
   "calibration_source": {
-    "confidence_sample_count": 384,
+    "confidence_sample_count": 459,
     "evaluation_fields_used": false,
     "excluded_invalid_records": 0,
     "failed_classifications": 0,
@@ -11,9 +11,9 @@
     "total_records": 500,
     "valid_operational_records": 500
   },
-  "classification_confidence_threshold": 0.74,
-  "classifier_model": "gpt-6-luna",
-  "classifier_provider": "openai",
+  "classification_confidence_threshold": 0.65,
+  "classifier_model": "gemini-decision-1",
+  "classifier_provider": "gemini",
   "frozen": true,
   "policy_version": "cs003-v5",
   "schema_version": 1,

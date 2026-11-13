@@ -309,21 +309,21 @@ def test_quality_judge_reconciliation_ignores_nonterminal_stage_events(
 def test_quality_judge_model_setting_is_separate_from_operational_model() -> None:
     settings = Settings.from_env(
         {
-            "OPENAI_API_KEY": "judge-secret",
-            "OPENAI_LLM_MODEL": "operational-model",
+            "GEMINI_API_KEY": "judge-secret",
+            "GEMINI_LLM_MODEL": "operational-model",
         }
     )
 
     assert settings.llm_model == "operational-model"
-    assert settings.quality_judge_model == "gpt-6-luna"
+    assert settings.quality_judge_model == "gemini-3.8-flash"
     assert settings.require_quality_judge_api_key() == "judge-secret"
 
     judge_settings = Settings.from_quality_judge_env(
         {
-            "OPENAI_LLM_MODEL": "operational-model",
-            "OPENAI_QUALITY_JUDGE_MODEL": "gpt-6-luna",
-            "OPENAI_API_KEY": "judge-secret",
+            "GEMINI_LLM_MODEL": "operational-model",
+            "GEMINI_QUALITY_JUDGE_MODEL": "gemini-3.8-flash",
+            "GEMINI_API_KEY": "judge-secret",
         }
     )
-    assert judge_settings.llm_model == "gpt-6-luna"
-    assert judge_settings.quality_judge_model == "gpt-6-luna"
+    assert judge_settings.llm_model == "gemini-3.8-flash"
+    assert judge_settings.quality_judge_model == "gemini-3.8-flash"

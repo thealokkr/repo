@@ -92,7 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
         "evaluate-quality",
         help="judge a reproducible 20-draft sample after a completed run",
         description=(
-            "Use GPT-6 Luna after processing to score response quality, citation support, "
+            "Use Gemini 3.8 Flash after processing to score response quality, citation support, "
             "and unsupported factual claims without changing ticket results or audits."
         ),
     )

@@ -341,7 +341,7 @@
     },
     "classifier_provider": {
       "enum": [
-        "openai",
+        "gemini",
         "not_attempted"
       ]
     },
@@ -848,7 +848,7 @@
         "provider": {
           "enum": [
             "offline",
-            "openai"
+            "gemini"
           ]
         },
         "model_name": {

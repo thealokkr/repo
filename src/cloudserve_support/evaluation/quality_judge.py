@@ -1,4 +1,4 @@
-"""Evaluate 20 completed drafts with an isolated, post-run GPT-6 Luna judge."""
+"""Evaluate 20 completed drafts with an isolated, post-run Gemini 3.8 Flash judge."""
 
 from __future__ import annotations
 
@@ -28,80 +28,73 @@ QUALITY_JUDGE_SAMPLE_SIZE = 20
 QUALITY_JUDGE_SAMPLE_SEED = "cloudserve-quality-judge-v1"
 QUALITY_JUDGE_RUBRIC_VERSION = "cs029-quality-rubric-v1"
 QUALITY_JUDGE_PROMPT_VERSION = "cs029-quality-judge-prompt-v1"
-QUALITY_JUDGE_MODEL = "gpt-6-luna"
-QUALITY_JUDGE_RESPONSE_FORMAT = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "cloudserve_quality_judgment",
-        "strict": True,
-        "schema": {
+QUALITY_JUDGE_MODEL = "gemini-3.8-flash"
+QUALITY_JUDGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "dimensions": {
             "type": "object",
             "properties": {
-                "dimensions": {
+                dimension: {
                     "type": "object",
                     "properties": {
-                        dimension: {
-                            "type": "object",
-                            "properties": {
-                                "score": {"type": "integer", "minimum": 1, "maximum": 5},
-                                "rationale": {"type": "string"},
-                            },
-                            "required": ["score", "rationale"],
-                            "additionalProperties": False,
-                        }
-                        for dimension in (
-                            "relevance",
-                            "factual_correctness",
-                            "completeness_actionability",
-                            "clarity",
-                        )
+                        "score": {"type": "integer", "minimum": 1, "maximum": 5},
+                        "rationale": {"type": "string"},
                     },
-                    "required": [
-                        "relevance",
-                        "factual_correctness",
-                        "completeness_actionability",
-                        "clarity",
-                    ],
+                    "required": ["score", "rationale"],
                     "additionalProperties": False,
-                },
-                "citations": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "citation_id": {"type": "string"},
-                            "supported": {"type": "boolean"},
-                            "rationale": {"type": "string"},
-                        },
-                        "required": ["citation_id", "supported", "rationale"],
-                        "additionalProperties": False,
-                    },
-                },
-                "unsupported_factual_claims": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "claim": {"type": "string"},
-                            "reviewed_passage_ids": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                            },
-                            "rationale": {"type": "string"},
-                        },
-                        "required": [
-                            "claim",
-                            "reviewed_passage_ids",
-                            "rationale",
-                        ],
-                        "additionalProperties": False,
-                    },
-                },
+                }
+                for dimension in (
+                    "relevance",
+                    "factual_correctness",
+                    "completeness_actionability",
+                    "clarity",
+                )
             },
-            "required": ["dimensions", "citations", "unsupported_factual_claims"],
+            "required": [
+                "relevance",
+                "factual_correctness",
+                "completeness_actionability",
+                "clarity",
+            ],
             "additionalProperties": False,
         },
+        "citations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "citation_id": {"type": "string"},
+                    "supported": {"type": "boolean"},
+                    "rationale": {"type": "string"},
+                },
+                "required": ["citation_id", "supported", "rationale"],
+                "additionalProperties": False,
+            },
+        },
+        "unsupported_factual_claims": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "claim": {"type": "string"},
+                    "reviewed_passage_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "rationale": {"type": "string"},
+                },
+                "required": [
+                    "claim",
+                    "reviewed_passage_ids",
+                    "rationale",
+                ],
+                "additionalProperties": False,
+            },
+        },
     },
+    "required": ["dimensions", "citations", "unsupported_factual_claims"],
+    "additionalProperties": False,
 }
 
 QUALITY_JUDGE_SYSTEM_PROMPT = """You are an independent post-run evaluator of a support response.
@@ -117,12 +110,12 @@ Score relevance, factual correctness, completeness/actionability, and clarity in
 Assess every supplied citation occurrence by its citation_id and judge whether its passage supports the attached claim. List every unsupported factual claim in the response, with the passage IDs reviewed and a concise evidence-based rationale. Do not list opinions, greetings, or questions as factual claims. If no factual claim is unsupported, return an empty array. If there are no citations, return an empty citations array. Return only the required structured fields and concise rationales; do not provide hidden chain-of-thought."""
 
 QUALITY_JUDGE_ERROR_MESSAGES = {
-    "quality_judge_configuration_error": "The quality judge is not configured with an OpenAI API key.",
-    "quality_judge_timeout": "The GPT-6 Luna judge request timed out.",
-    "quality_judge_rate_limited": "The GPT-6 Luna judge request was rate limited.",
-    "quality_judge_authentication_failed": "The GPT-6 Luna judge request was not authorized.",
-    "quality_judge_provider_error": "The GPT-6 Luna judge provider could not complete this ticket.",
-    "quality_judge_invalid_output": "The GPT-6 Luna judge returned invalid structured output.",
+    "quality_judge_configuration_error": "The quality judge is not configured with an API key.",
+    "quality_judge_timeout": "The Gemini judge request timed out.",
+    "quality_judge_rate_limited": "The Gemini judge request was rate limited.",
+    "quality_judge_authentication_failed": "The Gemini judge request was not authorized.",
+    "quality_judge_provider_error": "The Gemini judge provider could not complete this ticket.",
+    "quality_judge_invalid_output": "The Gemini judge returned invalid structured output.",
     "quality_judge_input_error": "The selected draft or its same-run evidence is invalid.",
     "quality_judge_duplicate_ticket_id": "The sampled ticket ID has duplicate generated drafts in this run.",
     "quality_judge_cross_run_record": "The selected result belongs to a different run.",
@@ -145,14 +138,14 @@ class QualityJudgeError(RuntimeError):
 
 
 class QualityJudgeProvider(Protocol):
-    """Return one structured GPT-6 Luna judgment without changing ticket decisions."""
+    """Return one structured judgment without changing ticket decisions."""
 
     def judge_quality_response(self, judge_input: dict[str, Any]) -> dict[str, Any]:
         """Judge a single response from allow-listed ticket, draft, reference, and source fields."""
 
 
-class OpenAIQualityJudgeProvider:
-    """Call the separately configured OpenAI judge model after a ticket run completes."""
+class GeminiQualityJudgeProvider:
+    """Call the separately configured Gemini judge model after a ticket run completes."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -165,22 +158,23 @@ class OpenAIQualityJudgeProvider:
             if self.settings.quality_judge_model != QUALITY_JUDGE_MODEL:
                 raise QualityJudgeError("quality_judge_configuration_error")
             if self._client is None:
-                from openai import OpenAI
+                from google import genai
 
-                self._client = OpenAI(api_key=api_key, timeout=60.0, max_retries=0)
-            response = self._client.chat.completions.create(
+                self._client = genai.Client(api_key=api_key)
+            from google.genai import types
+
+            response = self._client.models.generate_content(
                 model=self.settings.quality_judge_model,
-                messages=[
-                    {"role": "system", "content": QUALITY_JUDGE_SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": json.dumps(judge_input, ensure_ascii=True),
-                    },
-                ],
-                response_format=QUALITY_JUDGE_RESPONSE_FORMAT,
+                contents=json.dumps(judge_input, ensure_ascii=True),
+                config=types.GenerateContentConfig(
+                    system_instruction=QUALITY_JUDGE_SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                    response_schema=QUALITY_JUDGE_SCHEMA,
+                ),
             )
-            content = response.choices[0].message.content
-            if not isinstance(content, str):
+            content = getattr(response, "text", None)
+
+            if not isinstance(content, str) or not content.strip():
                 raise QualityJudgeError("quality_judge_invalid_output")
             payload = json.loads(content)
             if not isinstance(payload, dict):
@@ -195,9 +189,9 @@ class OpenAIQualityJudgeProvider:
             error_text = str(error).casefold()
             if "timeout" in error_name or "timeout" in error_text:
                 code = "quality_judge_timeout"
-            elif "ratelimit" in error_name or "rate_limit" in error_text:
+            elif "ratelimit" in error_name or "rate_limit" in error_text or "429" in error_text or "quota" in error_text:
                 code = "quality_judge_rate_limited"
-            elif "auth" in error_name or "permission" in error_name:
+            elif "auth" in error_name or "permission" in error_name or "401" in error_text or "403" in error_text:
                 code = "quality_judge_authentication_failed"
             else:
                 code = "quality_judge_provider_error"
@@ -286,7 +280,7 @@ def evaluate_quality_run(
     decision_hash_before = _sha256_file(decisions_path)
     results_hash_before = _sha256_file(results_path)
     if judge_provider is None:
-        judge_provider = OpenAIQualityJudgeProvider(settings or Settings.from_env())
+        judge_provider = GeminiQualityJudgeProvider(settings or Settings.from_env())
 
     selected_ticket_ids = [result["ticket_id"] for result in selected]
     reference_available_count = sum(

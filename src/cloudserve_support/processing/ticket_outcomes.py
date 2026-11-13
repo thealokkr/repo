@@ -10,7 +10,6 @@ from cloudserve_support.classification.ticket_classification import TicketClassi
 from cloudserve_support.config import Settings
 from cloudserve_support.domain.ticket import CanonicalTicket
 from cloudserve_support.generation.draft_generation import (
-    OPENAI_DRAFT_REASONING_EFFORT,
     DraftGenerationError,
     DraftGenerationProvider,
     parse_generated_claims,
@@ -193,10 +192,8 @@ def build_ticket_outcome(
 
     generation = {
         "provider": generator.name,
-        "model_name": settings.llm_model if generator.name == "openai" else "offline-extractive-v1",
-        "reasoning_effort": (
-            OPENAI_DRAFT_REASONING_EFFORT if generator.name == "openai" else None
-        ),
+        "model_name": settings.llm_model if generator.name == "gemini" else "offline-extractive-v1",
+        "reasoning_effort": None,
         "status": "not_attempted",
         "error_code": None,
     }

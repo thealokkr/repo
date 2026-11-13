@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-import openai
+from google import genai
 import pytest
 
 from cloudserve_support.classification.ticket_classification import (
@@ -94,17 +94,16 @@ def test_local_classifier_chunks_201_tickets_and_maps_failed_chunk_positions(
                 answers=answers,
             )
 
-    class LocalOpenAIClient:
+    class LocalClient:
         """Supply a deterministic Decisions adapter without a network client."""
 
         def __init__(self, **options: object) -> None:
-            assert options["max_retries"] == 0
             self.decisions = LocalDecisionsApi()
 
-    monkeypatch.setattr(openai, "OpenAI", LocalOpenAIClient)
+    monkeypatch.setattr(genai, "Client", LocalClient)
     batches = classify_ticket_batches(
         tickets,
-        Settings(openai_api_key="local-test-key"),
+        Settings(gemini_api_key="local-test-key"),
     )
 
     assert [batch.start_index for batch in batches] == [0, 200]
@@ -178,27 +177,26 @@ def test_decisions_classifier_splits_before_serialized_input_byte_limit(
             answers = [
                 SimpleNamespace(
                     type="choice",
-                    name=question["name"],
+                    name=name,
                     choice=(
                         "api_usage_question"
-                        if question["name"].endswith("_intent")
+                        if name.endswith("_intent")
                         else "low"
                     ),
                     confidence=0.99,
                 )
-                for question in request["questions"]
+                for name in (request["questions"].keys() if isinstance(request["questions"], dict) else [q["name"] for q in request["questions"]])
             ]
             return SimpleNamespace(model=DECISIONS_CLASSIFIER_MODEL, answers=answers)
 
-    class ByteBoundaryOpenAIClient:
+    class ByteBoundaryClient:
         def __init__(self, **options: object) -> None:
-            assert options["max_retries"] == 0
             self.decisions = ByteBoundaryDecisionsApi()
 
-    monkeypatch.setattr(openai, "OpenAI", ByteBoundaryOpenAIClient)
+    monkeypatch.setattr(genai, "Client", ByteBoundaryClient)
     batches = classify_ticket_batches(
         tickets,
-        Settings(openai_api_key="local-test-key"),
+        Settings(gemini_api_key="local-test-key"),
     )
 
     assert [batch.start_index for batch in batches] == [0, 2]

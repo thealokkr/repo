@@ -1,4 +1,4 @@
-"""Classify support tickets with named OpenAI Decisions API answers."""
+"""Classify support tickets with named Google Gemini Decisions API answers."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from cloudserve_support.domain.ticket_classification_vocabulary import (
     TICKET_URGENCY_VALUES as URGENCY_VALUES,
 )
 
-# The Decisions API currently supports only this classifier model.
-DECISIONS_CLASSIFIER_MODEL = "gpt-6-luna"
+# The Decisions API model for Gemini classification.
+DECISIONS_CLASSIFIER_MODEL = "gemini-decision-1"
 INTENT_ANSWER_NAME = "intent"
 URGENCY_ANSWER_NAME = "urgency"
 DECISIONS_MAX_QUESTIONS = 400
@@ -129,33 +129,51 @@ def parse_decision_classifications(
     if ticket_count < 1 or ticket_count > CLASSIFICATION_TICKETS_PER_BATCH:
         raise ClassificationOutputError("Decisions batch ticket count is outside the supported range.")
 
-    actual_model_name = _decision_field(decision, "model")
-    if actual_model_name != DECISIONS_CLASSIFIER_MODEL:
-        raise ClassificationOutputError("Decisions response used an unsupported classifier model.")
-    answers = _decision_field(decision, "answers")
-    if not isinstance(answers, (list, tuple)):
-        raise ClassificationOutputError("Decisions response answers must be an array.")
+    raw_model_name = _decision_field(decision, "model")
+    if raw_model_name is not None:
+        actual_model_name = str(raw_model_name).removeprefix("models/")
+        if actual_model_name != DECISIONS_CLASSIFIER_MODEL:
+            raise ClassificationOutputError("Decisions response used an unsupported classifier model.")
+    else:
+        actual_model_name = DECISIONS_CLASSIFIER_MODEL
 
+    answers = _decision_field(decision, "answers")
     expected_names = {
         answer_name
         for ticket_index in range(ticket_count)
         for answer_name in _ticket_answer_names(ticket_index)
     }
     answer_by_name: dict[str, object] = {}
-    for answer in answers:
-        answer_type = _decision_field(answer, "type")
-        answer_name = _decision_field(answer, "name")
-        if answer_type == "refusal":
-            if answer_name not in expected_names:
+
+    if isinstance(answers, dict):
+        for answer_name, answer in answers.items():
+            if not isinstance(answer_name, str) or answer_name not in expected_names:
                 raise ClassificationOutputError("Decisions response contains an unknown answer name.")
-            raise ClassificationOutputError("Decisions API refused a classification question.")
-        if not isinstance(answer_name, str) or answer_name not in expected_names:
-            raise ClassificationOutputError("Decisions response contains an unknown answer name.")
-        if answer_name in answer_by_name:
-            raise ClassificationOutputError("Decisions response contains a duplicate answer name.")
-        if answer_type != "choice":
-            raise ClassificationOutputError("Decisions response answer must be a choice.")
-        answer_by_name[answer_name] = answer
+            if answer_name in answer_by_name:
+                raise ClassificationOutputError("Decisions response contains a duplicate answer name.")
+            answer_type = _decision_field(answer, "type")
+            if answer_type == "refusal":
+                raise ClassificationOutputError("Decisions API refused a classification question.")
+            if answer_type != "choice":
+                raise ClassificationOutputError("Decisions response answer must be a choice.")
+            answer_by_name[answer_name] = answer
+    elif isinstance(answers, (list, tuple)):
+        for answer in answers:
+            answer_type = _decision_field(answer, "type")
+            answer_name = _decision_field(answer, "name")
+            if answer_type == "refusal":
+                if answer_name not in expected_names:
+                    raise ClassificationOutputError("Decisions response contains an unknown answer name.")
+                raise ClassificationOutputError("Decisions API refused a classification question.")
+            if not isinstance(answer_name, str) or answer_name not in expected_names:
+                raise ClassificationOutputError("Decisions response contains an unknown answer name.")
+            if answer_name in answer_by_name:
+                raise ClassificationOutputError("Decisions response contains a duplicate answer name.")
+            if answer_type != "choice":
+                raise ClassificationOutputError("Decisions response answer must be a choice.")
+            answer_by_name[answer_name] = answer
+    else:
+        raise ClassificationOutputError("Decisions response answers must be a dictionary or array.")
 
     if set(answer_by_name) != expected_names:
         raise ClassificationOutputError("Decisions response is missing a named classification answer.")
@@ -189,7 +207,7 @@ def _classification_from_answers(
         intent=intent,
         urgency=urgency,
         confidence=confidence,
-        provider="openai",
+        provider="gemini",
         model_name=model_name,
         provider_status="classified",
     )
@@ -204,18 +222,14 @@ def classify_ticket_batches(
         return ()
 
     client = None
-    if not settings.openai_api_key:
-        client_error = "OPENAI_API_KEY is not configured"
+    if not settings.gemini_api_key:
+        client_error = "GEMINI_API_KEY or GOOGLE_API_KEY is not configured"
     else:
         client_error = "classification provider failed"
         try:
-            from openai import OpenAI
+            from google import genai
 
-            client = OpenAI(
-                api_key=settings.openai_api_key,
-                timeout=15.0,
-                max_retries=0,
-            )
+            client = genai.Client(api_key=settings.gemini_api_key)
         except Exception:
             client = None
 
@@ -225,7 +239,7 @@ def classify_ticket_batches(
         if len(batch_input.encode("utf-8")) > DECISIONS_MAX_INPUT_BYTES:
             classifications = tuple(
                 classification_failure(
-                    provider="openai",
+                    provider="gemini",
                     model_name=DECISIONS_CLASSIFIER_MODEL,
                     uncertainty="ticket content exceeds the Decisions API input limit",
                 )
@@ -238,7 +252,7 @@ def classify_ticket_batches(
         if client is None:
             classifications = tuple(
                 classification_failure(
-                    provider="openai",
+                    provider="gemini",
                     model_name=DECISIONS_CLASSIFIER_MODEL,
                     uncertainty=client_error,
                 )
@@ -253,6 +267,7 @@ def classify_ticket_batches(
         try:
             decision = client.decisions.create(
                 model=DECISIONS_CLASSIFIER_MODEL,
+                api_version="v1beta",
                 input=batch_input,
                 questions=_ticket_batch_questions(len(batch_tickets)),
             )
@@ -263,7 +278,7 @@ def classify_ticket_batches(
         except ClassificationOutputError as error:
             classifications = tuple(
                 classification_failure(
-                    provider="openai",
+                    provider="gemini",
                     model_name=DECISIONS_CLASSIFIER_MODEL,
                     uncertainty=str(error),
                 )
@@ -272,7 +287,7 @@ def classify_ticket_batches(
         except Exception:
             classifications = tuple(
                 classification_failure(
-                    provider="openai",
+                    provider="gemini",
                     model_name=DECISIONS_CLASSIFIER_MODEL,
                     uncertainty="classification provider failed",
                 )
@@ -346,28 +361,30 @@ def _ticket_batch_input(tickets: Sequence[CanonicalTicket]) -> str:
     )
 
 
-def _ticket_batch_questions(ticket_count: int) -> tuple[dict[str, Any], ...]:
+def _ticket_batch_questions(ticket_count: int) -> dict[str, dict[str, Any]]:
     """Build unique intent and urgency questions for each ticket in a chunk."""
-    questions: list[dict[str, Any]] = []
+    questions: dict[str, dict[str, Any]] = {}
     for ticket_index in range(ticket_count):
-        for template, answer_suffix in (
-            (CLASSIFICATION_DECISION_QUESTIONS[0], INTENT_ANSWER_NAME),
-            (CLASSIFICATION_DECISION_QUESTIONS[1], URGENCY_ANSWER_NAME),
-        ):
-            questions.append(
-                {
-                    **template,
-                    "name": f"ticket_{ticket_index}_{answer_suffix}",
-                    "instructions": (
-                        f"{template['instructions']} Evaluate only the ticket at zero-based "
-                        f"index {ticket_index} in the input JSON's tickets array. Ignore all "
-                        "other tickets in the shared input."
-                    ),
-                }
-            )
+        intent_name, urgency_name = _ticket_answer_names(ticket_index)
+        questions[intent_name] = {
+            "type": "choice",
+            "instructions": (
+                f"{CLASSIFICATION_DECISION_QUESTIONS[0]['instructions']} "
+                f"Evaluate only index {ticket_index} in the tickets array."
+            ),
+            "criteria": {value: value.replace("_", " ") for value in sorted(INTENT_VALUES)},
+        }
+        questions[urgency_name] = {
+            "type": "choice",
+            "instructions": (
+                f"{CLASSIFICATION_DECISION_QUESTIONS[1]['instructions']} "
+                f"Evaluate only index {ticket_index} in the tickets array."
+            ),
+            "criteria": {value: value for value in sorted(URGENCY_VALUES)},
+        }
     if len(questions) > DECISIONS_MAX_QUESTIONS:
         raise ValueError("Decisions classification batch exceeds the 400-question limit.")
-    return tuple(questions)
+    return questions
 
 
 def _ticket_answer_names(ticket_index: int) -> tuple[str, str]:
@@ -380,8 +397,8 @@ def _ticket_answer_names(ticket_index: int) -> tuple[str, str]:
 
 def classification_failure(
     *,
-    provider: str,
-    model_name: str,
+    provider: str = "gemini",
+    model_name: str = DECISIONS_CLASSIFIER_MODEL,
     uncertainty: str,
 ) -> TicketClassification:
     """Build an unclear classification for missing credentials or Decisions failure."""
@@ -424,5 +441,7 @@ def _probability_value(value: object, field_name: str) -> float:
 
 
 def _decision_field(value: object, field_name: str) -> object:
-    """Read one field from an OpenAI SDK response object."""
+    """Read one field from a Decisions response object or mapping."""
+    if isinstance(value, dict):
+        return value.get(field_name)
     return getattr(value, field_name, None)

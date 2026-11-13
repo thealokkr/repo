@@ -754,7 +754,7 @@ GENERATION_SCHEMA = {
     "additionalProperties": False,
     "required": ["provider", "model_name", "reasoning_effort", "status", "error_code"],
     "properties": {
-        "provider": {"enum": ["offline", "openai"]},
+        "provider": {"enum": ["offline", "gemini"]},
         "model_name": {"type": "string", "minLength": 1},
         "reasoning_effort": {"type": ["string", "null"]},
         "status": {"enum": ["not_attempted", "generated", "failed"]},
@@ -815,7 +815,7 @@ OUTPUT_SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
                 },
             },
             "classifier_confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
-            "classifier_provider": {"enum": ["openai", "not_attempted"]},
+            "classifier_provider": {"enum": ["gemini", "not_attempted"]},
             "classifier_model": {"type": "string", "minLength": 1},
             "classifier_status": {"enum": ["classified", "fallback"]},
             "routing": ROUTING_SCHEMA,

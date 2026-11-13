@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-import openai
+from google import genai
 import pytest
 
 from cloudserve_support import cli
@@ -57,10 +57,10 @@ def _decision_choice(name: str, selected: str, values: frozenset[str]) -> Simple
 
 def _install_decisions_api_mock(monkeypatch, choose_labels) -> None:
     """Replace only the Decisions SDK request with a canned typed response."""
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("DRAFT_GENERATION_PROVIDER", "OFFLINE")
 
-    class FakeOpenAI:
+    class FakeGenAIClient:
         def __init__(self, **options: object) -> None:
             self.decisions = SimpleNamespace(create=self.create_decision)
 
@@ -68,25 +68,21 @@ def _install_decisions_api_mock(monkeypatch, choose_labels) -> None:
         def create_decision(**request: object) -> SimpleNamespace:
             batch_input = json.loads(request["input"])
             ticket_fields = batch_input["tickets"]
-            answers = []
+            answers = {}
             for ticket_index, ticket in enumerate(ticket_fields):
                 intent, urgency = choose_labels(ticket)
-                answers.extend(
-                    [
-                        _decision_choice(
-                            f"ticket_{ticket_index}_intent", intent, INTENT_VALUES
-                        ),
-                        _decision_choice(
-                            f"ticket_{ticket_index}_urgency", urgency, URGENCY_VALUES
-                        ),
-                    ]
+                answers[f"ticket_{ticket_index}_intent"] = _decision_choice(
+                    f"ticket_{ticket_index}_intent", intent, INTENT_VALUES
+                )
+                answers[f"ticket_{ticket_index}_urgency"] = _decision_choice(
+                    f"ticket_{ticket_index}_urgency", urgency, URGENCY_VALUES
                 )
             return SimpleNamespace(
                 model=DECISIONS_CLASSIFIER_MODEL,
                 answers=answers,
             )
 
-    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(genai, "Client", FakeGenAIClient)
 
 
 class _ReadyRetriever:
@@ -123,7 +119,7 @@ class _ReadyRetriever:
             eligible_candidate_count=1,
             excluded_candidate_counts={},
             minimum_similarity=0.45,
-            embedding_model="text-embedding-3-small",
+            embedding_model="gemini-embedding-001",
             source_sha256="c" * 64,
             metadata_manifest_sha256="b" * 64,
         )
@@ -249,7 +245,7 @@ def test_one_ticket_run_persists_label_audit_and_schema_valid_exports(
             (run_id,),
         ).fetchone()
         assert audit_provenance is not None
-        assert audit_provenance[0] == "gpt-6-luna"
+        assert audit_provenance[0] == "gemini-decision-1"
         assert json.loads(audit_provenance[1])["intent"] == "deployment_failure"
         assert json.loads(audit_provenance[2]) == []
         assert audit_provenance[3] == results[0]["routing"]["confidence_threshold"]

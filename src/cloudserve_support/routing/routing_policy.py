@@ -180,7 +180,7 @@ def route_ticket_classification(
             evidence_ready=evidence_ready,
         )
     model_matches_policy = (
-        policy["classifier_provider"] == "openai"
+        policy["classifier_provider"] == "gemini"
         and policy["classifier_model"] == DECISIONS_CLASSIFIER_MODEL
         and classification["provider"] == policy["classifier_provider"]
         and classification["model_name"] == policy["classifier_model"]

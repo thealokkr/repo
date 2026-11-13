@@ -65,7 +65,7 @@ class DeterministicBulkRetriever:
                 eligible_candidate_count=1,
                 excluded_candidate_counts={"below_relevance_threshold": 1},
                 minimum_similarity=MINIMUM_SIMILARITY,
-                embedding_model="text-embedding-3-small",
+                embedding_model="gemini-embedding-001",
                 source_sha256=self.source_sha256,
                 metadata_manifest_sha256=self.metadata_manifest_sha256,
             )
@@ -82,7 +82,7 @@ def test_cli_commits_every_bulk_retrieval_before_first_route(
     """Exercise bulk dispatch, committed retrieval checkpoints, then real routing."""
     assert DEFAULT_EMBEDDING_BATCH_SIZE == 5
     assert DEFAULT_QUERY_BATCH_SIZE == 5
-    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("GEMINI_API_KEY", "")
     monkeypatch.setenv("DRAFT_GENERATION_PROVIDER", "OFFLINE")
     schema_directory = tmp_path / "schemas" / "outputs"
     initialize_output_schemas(schema_directory)
@@ -117,7 +117,7 @@ def test_cli_commits_every_bulk_retrieval_before_first_route(
                 intent="other",
                 urgency="low",
                 confidence=0.95,
-                provider="openai",
+                provider="gemini",
                 model_name=DECISIONS_CLASSIFIER_MODEL,
                 provider_status="classified",
             )
