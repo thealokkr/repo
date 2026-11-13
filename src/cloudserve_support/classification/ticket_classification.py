@@ -10,50 +10,10 @@ from typing import Any, Sequence
 
 from cloudserve_support.config import Settings
 from cloudserve_support.domain.ticket import CanonicalTicket
-
-
-INTENT_VALUES = frozenset(
-    {
-        "account",
-        "account_compromise",
-        "account_access",
-        "api",
-        "api_key_issue",
-        "api_usage_question",
-        "authentication",
-        "authentication_failure",
-        "billing",
-        "billing_dispute",
-        "billing_query",
-        "compliance",
-        "compliance_request",
-        "configuration_help",
-        "data",
-        "data_location",
-        "data_export",
-        "data_residency",
-        "database_issue",
-        "deployment",
-        "deployment_failure",
-        "feature_request",
-        "integration",
-        "integration_help",
-        "onboarding",
-        "other",
-        "performance",
-        "performance_degradation",
-        "quota_or_overage",
-        "rate_limit",
-        "rollback_request",
-        "roadmap_request",
-        "security",
-        "security_incident",
-        "sso_configuration",
-        "unclear_request",
-        "webhook_issue",
-    }
+from cloudserve_support.domain.ticket_classification_vocabulary import (
+    TICKET_INTENT_VALUES as INTENT_VALUES,
+    TICKET_URGENCY_VALUES as URGENCY_VALUES,
 )
-URGENCY_VALUES = frozenset({"high", "medium", "low", "unknown"})
 
 # The Decisions API currently supports only this classifier model.
 DECISIONS_CLASSIFIER_MODEL = "gpt-6-luna"

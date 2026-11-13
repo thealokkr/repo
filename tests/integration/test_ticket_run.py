@@ -235,7 +235,7 @@ def test_one_ticket_run_persists_label_audit_and_schema_valid_exports(
         assert run_row == (run_id, "cs001-tracer", str(output_directory), "completed")
         assert connection.execute("SELECT COUNT(*) FROM ticket_runs WHERE run_id = ?", (run_id,)).fetchone()[0] == 1
         audit_row = connection.execute(
-            "SELECT event_id, ticket_id, result_payload_json, sources_json FROM audit_events "
+            "SELECT event_id, ticket_id, event_payload_json, sources_json FROM audit_events "
             "WHERE run_id = ? AND event_type = 'ticket_completed'",
             (run_id,),
         ).fetchone()
@@ -347,7 +347,7 @@ def test_stage_checkpoints_commit_before_the_next_batch_phase(
     assert_database_event_count("ticket_completed", 2)
     with sqlite3.connect(database_path) as connection:
         rows = connection.execute(
-            "SELECT event_type, result_payload_json, sources_json FROM audit_events "
+            "SELECT event_type, event_payload_json, sources_json FROM audit_events "
             "WHERE run_id = ? ORDER BY rowid",
             (run_id,),
         ).fetchall()
@@ -419,7 +419,7 @@ def test_ticket_duration_includes_audit_commit_and_is_persisted_with_result(
     connection = sqlite3.connect(tmp_path / "runtime.sqlite3")
     try:
         persisted_payload = connection.execute(
-            "SELECT result_payload_json FROM audit_events WHERE run_id = ? AND event_type IN ('ticket_completed', 'ticket_failed')",
+            "SELECT event_payload_json FROM audit_events WHERE run_id = ? AND event_type IN ('ticket_completed', 'ticket_failed')",
             (run_id,),
         ).fetchone()
     finally:
@@ -1676,7 +1676,7 @@ def test_runtime_schema_migration_preserves_existing_run_rows(tmp_path: Path) ->
         assert connection.execute(
             "SELECT run_id, input_ref, label, output_dir FROM processing_runs"
         ).fetchone() == ("legacy-run", "old.json", None, None)
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
     finally:
         connection.close()
 

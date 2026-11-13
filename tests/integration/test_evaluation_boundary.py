@@ -109,11 +109,11 @@ def test_labels_and_history_change_only_post_run_evaluation(
 
     with sqlite3.connect(database_path) as connection:
         persisted_rows = connection.execute(
-            "SELECT context_json, result_payload_json FROM ticket_runs "
+            "SELECT context_json, event_payload_json FROM ticket_runs "
             "JOIN audit_events USING (run_id, ticket_id)"
         ).fetchall()
-    for context_json, result_payload_json in persisted_rows:
+    for context_json, event_payload_json in persisted_rows:
         assert "labels" not in context_json
         assert "history" not in context_json
-        assert "fixture-label-a" not in result_payload_json
-        assert "billing" not in result_payload_json
+        assert "fixture-label-a" not in event_payload_json
+        assert "billing" not in event_payload_json

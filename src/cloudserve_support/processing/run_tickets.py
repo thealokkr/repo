@@ -80,6 +80,7 @@ class _PreparedTicket:
     input_index: int
     ticket: CanonicalTicket
     storage_ticket_id: str
+    input_labels_json: str | None
     issues: list[str]
     duplicate_ticket_id: bool
     pre_provider_guardrail_block: bool
@@ -153,6 +154,7 @@ def run_ticket_batch(
                 customer_tier=ticket.customer_tier,
                 language_fluency=ticket.language_fluency,
                 context=ticket.context,
+                input_labels_json=prepared_ticket.input_labels_json,
             )
         connection.commit()
         classifiable_tickets = [
@@ -222,7 +224,8 @@ def run_ticket_batch(
                     **retrieval.as_dict(),
                     "passages": [
                         {
-                            "passage_id": source.get("passage_id"),
+                            "doc_id": source["doc_id"],
+                            "passage_id": source["passage_id"],
                             "similarity": source.get("similarity"),
                         }
                         for source in retrieval.sources
@@ -673,6 +676,12 @@ def _prepare_ticket_records(input_records: list[Any]) -> list[_PreparedTicket]:
     used_storage_ticket_ids: set[str] = set()
     for input_index, raw_ticket in enumerate(input_records):
         ticket = normalize_ticket_record(raw_ticket, input_index=input_index)
+        raw_record = raw_ticket if isinstance(raw_ticket, dict) else {}
+        input_labels_json = (
+            json.dumps(raw_record["labels"], ensure_ascii=True, separators=(",", ":"))
+            if "labels" in raw_record
+            else None
+        )
         issues = list(ticket.validation_errors)
         duplicate = ticket.has_ticket_id and ticket.ticket_id in seen_ticket_ids
         if ticket.has_ticket_id:
@@ -716,6 +725,7 @@ def _prepare_ticket_records(input_records: list[Any]) -> list[_PreparedTicket]:
                 input_index=input_index,
                 ticket=ticket,
                 storage_ticket_id=storage_ticket_id,
+                input_labels_json=input_labels_json,
                 issues=issues,
                 duplicate_ticket_id=duplicate,
                 pre_provider_guardrail_block=pre_provider_guardrail_block,

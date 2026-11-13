@@ -80,7 +80,7 @@ def test_run_audit_events_are_chronological_and_replay_decision_evidence(
         assert json.loads(events[0]["guardrail_results_json"]) == {
             "checks": [{"check": "source_eligibility", "passed": True, "blocked": False}]
         }
-        assert json.loads(events[0]["result_payload_json"])["route"] == "draft_for_review"
+        assert json.loads(events[0]["event_payload_json"])["route"] == "draft_for_review"
     finally:
         connection.close()
 

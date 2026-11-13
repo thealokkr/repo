@@ -200,7 +200,7 @@ def test_live_run_persists_stage_checkpoints_before_routing(
             "SELECT COUNT(*) FROM ticket_runs WHERE run_id = ?", (run_id,)
         ).fetchone()[0]
         audit_rows = connection.execute(
-            "SELECT ticket_id, event_type, sources_json, result_payload_json FROM audit_events "
+            "SELECT ticket_id, event_type, sources_json, event_payload_json FROM audit_events "
             "WHERE run_id = ? ORDER BY rowid",
             (run_id,),
         ).fetchall()

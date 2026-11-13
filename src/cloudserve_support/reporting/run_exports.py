@@ -52,7 +52,7 @@ def write_run_exports(
     terminal_ticket_ids: set[str] = set()
     identity_by_occurrence: dict[str, tuple[int, str]] = {}
     for event in events:
-        payload = json.loads(event["result_payload_json"])
+        payload = json.loads(event["event_payload_json"])
         input_index = payload.get("input_index")
         ticket_id = payload.get("ticket_id")
         if (
