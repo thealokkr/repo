@@ -93,7 +93,7 @@ For a batch containing tickets `T-104` and `T-105`:
 4. Resolve and commit one `retrieval` event per occurrence. Retrieval event payloads record status and separate document/passage IDs with scores, but no passage text. The full batch retrieval phase is persisted before the first routing event.
 5. Commit one `routing` event per occurrence, then a `generation` event after drafting or a safe skip resolves. Every stage event stores `{input_index, ticket_id, stage, status, value, reason}` in `event_payload_json`.
 6. Append one terminal `ticket_completed` or `ticket_failed` event with the complete result and eligible source snapshots, and update the ticket's status in the same transaction.
-7. Generate a human-readable or machine-readable export under `outputs/` from persisted events. `results.jsonl` contains exactly one terminal result per input occurrence; `decision_log.jsonl` contains every stage and terminal event in chronological order.
+7. Generate exports under `outputs/` from persisted events. `results.jsonl` contains exactly one terminal result per input occurrence plus a `generated_labels` object (or JSON `null`) derived from `ticket_label_comparison`; `decision_log.jsonl` contains every stage and terminal event in chronological order and retains the original terminal payload.
 
 If `T-104` is submitted again later, it gets a new `ticket_runs` row because its `run_id` differs. Its history from earlier runs remains queryable under the previous run.
 
@@ -133,6 +133,12 @@ ORDER BY run_id, ticket_id;
 ```
 
 `generated_labels_json` is text in SQLite; when parsed as JSON, booleans remain booleans and `expected_doc_ids` remains an array (not a JSON-encoded string). The runtime initializer recreates this derived view transactionally; it does not rewrite historical `ticket_runs` or `audit_events`.
+
+## Result labels and Markdown metrics
+
+`results.jsonl` retains its existing terminal result and draft fields and adds `generated_labels`, using the exact six-key schema shown by the comparison view. It is JSON `null` whenever the view reports unavailable predictions. The additive export field is not written back to terminal audit payloads or decision-log event results. Supplied labels remain isolated from inference and are not included in any result row.
+
+Each run also writes `metrics.md` beside the JSON exports. It summarizes total, successfully processed, failed, and labeled ticket occurrences; elapsed run wall time is calculated only from persisted `processing_runs.started_at` through `completed_at` (missing or invalid timestamps display as unavailable, never an estimated duration). Its six label rows show `Matched`, `Different`, `Not compared`, and `Match rate`. Invalid, missing, or unavailable values count as not compared; those values are excluded from the match-rate denominator, and a zero denominator displays `N/A`. `auto_respond` labels compare to actual `draft_for_review` without indicating a message was sent. Expected document IDs compare as unordered sets. Answerability and protected-case metrics compare to evidence-readiness and protected-case routing proxies, not semantic ground truth. Both inputs and generated values are read after processing from the occurrence-matched SQLite comparison view; label snapshots remain evaluation-only.
 
 ## Current implementation status
 

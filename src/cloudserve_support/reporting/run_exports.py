@@ -5,9 +5,14 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from cloudserve_support.domain.ticket_classification_vocabulary import (
+    TICKET_INTENT_VALUES,
+    TICKET_URGENCY_VALUES,
+)
 from cloudserve_support.persistence.runtime_database import (
     read_run_audit_events,
     read_run_ticket_ids,
@@ -20,6 +25,18 @@ from cloudserve_support.reporting.output_schemas import (
 
 
 ROUTE_VALUES = ("draft_for_review", "escalate", "degrade")
+LABEL_FIELDS = (
+    "intent",
+    "urgency",
+    "expected_route",
+    "answerable_from_docs",
+    "expected_doc_ids",
+    "must_not_auto_respond",
+)
+EXPECTED_ROUTE_ALIASES = {"auto_respond": "draft_for_review"}
+EXPECTED_ROUTE_LABEL_VALUES = frozenset(
+    {"auto_respond", "draft_for_review", "escalate", "degrade"}
+)
 
 
 def write_run_exports(
@@ -130,6 +147,19 @@ def write_run_exports(
             "Export reconciliation failed: result rows do not cover each input index once."
         )
 
+    label_comparisons = _read_run_label_comparisons(
+        connection,
+        run_id=run_id,
+        identity_by_occurrence=identity_by_occurrence,
+    )
+    results = [
+        {
+            **result,
+            "generated_labels": label_comparisons[result["input_index"]]["generated_labels"],
+        }
+        for result in results
+    ]
+
     exceptions = [
         {
             "run_id": result["run_id"],
@@ -194,6 +224,118 @@ def write_run_exports(
     return metrics
 
 
+def write_markdown_run_metrics(
+    connection: Any,
+    *,
+    run_id: str,
+    output_directory: Path,
+) -> None:
+    """Write a human-readable label comparison report from persisted run data."""
+    events = read_run_audit_events(connection, run_id)
+    identity_by_occurrence: dict[str, tuple[int, str]] = {}
+    for event in events:
+        if event["event_type"] not in {"ticket_completed", "ticket_failed"}:
+            continue
+        try:
+            payload = json.loads(event["event_payload_json"])
+        except (TypeError, json.JSONDecodeError) as error:
+            raise RuntimeError(
+                "Run metrics export failed: terminal event identity is invalid JSON."
+            ) from error
+        input_index = payload.get("input_index")
+        ticket_id = payload.get("ticket_id")
+        if (
+            not isinstance(input_index, int)
+            or isinstance(input_index, bool)
+            or not isinstance(ticket_id, str)
+        ):
+            raise RuntimeError("Run metrics export failed: terminal event identity is invalid.")
+        identity_by_occurrence[event["ticket_id"]] = (input_index, ticket_id)
+
+    label_comparisons = _read_run_label_comparisons(
+        connection,
+        run_id=run_id,
+        identity_by_occurrence=identity_by_occurrence,
+    )
+    run = connection.execute(
+        "SELECT started_at, completed_at FROM processing_runs WHERE run_id = ?",
+        (run_id,),
+    ).fetchone()
+    elapsed_seconds = _elapsed_run_seconds(run)
+    matched_counts = dict.fromkeys(LABEL_FIELDS, 0)
+    different_counts = dict.fromkeys(LABEL_FIELDS, 0)
+    tickets_with_labels = sum(
+        comparison["provided_labels_present"]
+        for comparison in label_comparisons.values()
+    )
+
+    for comparison in label_comparisons.values():
+        labels = comparison["provided_labels"]
+        generated_labels = comparison["generated_labels"]
+        for field in LABEL_FIELDS:
+            if labels is None or generated_labels is None or field not in labels:
+                continue
+            provided_value = labels[field]
+            generated_value = generated_labels.get(field)
+            if not _valid_label_value(field, provided_value, generated=False):
+                continue
+            if not _valid_label_value(field, generated_value, generated=True):
+                continue
+            if field == "expected_doc_ids":
+                is_match = set(provided_value) == set(generated_value)
+            else:
+                expected_value = EXPECTED_ROUTE_ALIASES.get(
+                    provided_value, provided_value
+                ) if field == "expected_route" else provided_value
+                is_match = expected_value == generated_value
+            if is_match:
+                matched_counts[field] += 1
+            else:
+                different_counts[field] += 1
+
+    lines = [
+        "# Run metrics",
+        "",
+        f"- Run ID: `{run_id}`",
+        f"- Total tickets: {len(label_comparisons)}",
+        f"- Processed successfully: {sum(comparison['processing_status'] == 'completed' for comparison in label_comparisons.values())}",
+        f"- Processing failures: {sum(comparison['processing_status'] == 'failed' for comparison in label_comparisons.values())}",
+        f"- Tickets with provided labels: {tickets_with_labels}",
+        f"- Elapsed run time: {_format_elapsed_run_time(elapsed_seconds)}",
+        "  (from `processing_runs.started_at` through `completed_at`; not summed ticket latency)",
+        "",
+        "| Label | Matched | Different | Not compared | Match rate |",
+        "| --- | ---: | ---: | ---: | ---: |",
+    ]
+    for field in LABEL_FIELDS:
+        comparable_count = matched_counts[field] + different_counts[field]
+        not_compared_count = len(label_comparisons) - comparable_count
+        match_rate = (
+            f"{matched_counts[field] / comparable_count * 100:.1f}%"
+            if comparable_count
+            else "N/A"
+        )
+        lines.append(
+            f"| {field} | {matched_counts[field]} | {different_counts[field]} | "
+            f"{not_compared_count} | {match_rate} |"
+        )
+    lines.extend(
+        [
+            "",
+            "Label snapshots are evaluation-only and are read from SQLite after processing; "
+            "they are never supplied to inference. `expected_route` maps the input-only "
+            "`auto_respond` alias to the actual `draft_for_review` route; drafts remain unsent.",
+            "`answerable_from_docs` compares to the persisted evidence-readiness proxy, and "
+            "`must_not_auto_respond` compares to the protected-case proxy; neither is a "
+            "semantic ground-truth judgment. Document IDs compare as unordered sets.",
+            "Missing, invalid, or unavailable values are counted as not compared and are "
+            "excluded from each field's match-rate denominator.",
+            "",
+        ]
+    )
+    _replace_file_atomically(output_directory / "metrics.md", "\n".join(lines))
+
+
 def record_batch_export_duration(
     *,
     metrics: dict[str, Any],
@@ -210,6 +352,114 @@ def record_batch_export_duration(
     )
     _write_json_atomic(output_directory / "metrics.json", metrics)
     return metrics
+
+
+def _read_run_label_comparisons(
+    connection: Any,
+    *,
+    run_id: str,
+    identity_by_occurrence: dict[str, tuple[int, str]],
+) -> dict[int, dict[str, Any]]:
+    """Read labels and generated predictions by their persisted ticket occurrence."""
+    rows = connection.execute(
+        """SELECT comparison.ticket_id, comparison.input_labels_json,
+                  comparison.generated_labels_json, comparison.generated_labels_status,
+                  ticket.processing_status,
+                  comparison.input_labels_json IS NOT NULL AS provided_labels_present
+           FROM ticket_label_comparison AS comparison
+           JOIN ticket_runs AS ticket
+             ON ticket.run_id = comparison.run_id
+            AND ticket.ticket_id = comparison.ticket_id
+           WHERE comparison.run_id = ?""",
+        (run_id,),
+    ).fetchall()
+    if len(rows) != len(identity_by_occurrence):
+        raise RuntimeError(
+            "Run metrics export failed: comparison view does not cover every ticket occurrence."
+        )
+
+    comparisons_by_input_index: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        occurrence_id = row["ticket_id"]
+        identity = identity_by_occurrence.get(occurrence_id)
+        if identity is None:
+            raise RuntimeError(
+                "Run metrics export failed: comparison view has an unknown ticket occurrence."
+            )
+        input_index, _ticket_id = identity
+        if input_index in comparisons_by_input_index:
+            raise RuntimeError(
+                "Run metrics export failed: comparison view repeats an input occurrence."
+            )
+        provided_labels = _decode_json_object(row["input_labels_json"])
+        generated_labels = None
+        if row["generated_labels_status"] == "available":
+            candidate = _decode_json_object(row["generated_labels_json"])
+            if (
+                candidate is not None
+                and set(candidate) == set(LABEL_FIELDS)
+                and all(
+                    _valid_label_value(field, candidate[field], generated=True)
+                    for field in LABEL_FIELDS
+                )
+            ):
+                generated_labels = candidate
+        comparisons_by_input_index[input_index] = {
+            "provided_labels": provided_labels,
+            "provided_labels_present": bool(row["provided_labels_present"]),
+            "generated_labels": generated_labels,
+            "processing_status": row["processing_status"],
+        }
+    return comparisons_by_input_index
+
+
+def _decode_json_object(value: Any) -> dict[str, Any] | None:
+    """Decode one persisted JSON object without coercing invalid or non-object labels."""
+    if not isinstance(value, str):
+        return None
+    try:
+        decoded = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _valid_label_value(field: str, value: Any, *, generated: bool) -> bool:
+    """Check native label types before comparing evaluation fields."""
+    if field == "intent":
+        return isinstance(value, str) and value in TICKET_INTENT_VALUES
+    if field == "urgency":
+        return isinstance(value, str) and value in TICKET_URGENCY_VALUES
+    if field == "expected_route":
+        valid_routes = ROUTE_VALUES if generated else EXPECTED_ROUTE_LABEL_VALUES
+        return isinstance(value, str) and value in valid_routes
+    if field in {"answerable_from_docs", "must_not_auto_respond"}:
+        return type(value) is bool
+    if field == "expected_doc_ids":
+        return isinstance(value, list) and all(
+            isinstance(item, str) and bool(item.strip()) for item in value
+        )
+    return False
+
+
+def _elapsed_run_seconds(run: Any) -> float | None:
+    """Calculate run wall time only from its persisted UTC start and completion times."""
+    if run is None or not run["started_at"] or not run["completed_at"]:
+        return None
+    try:
+        started_at = datetime.fromisoformat(run["started_at"].replace("Z", "+00:00"))
+        completed_at = datetime.fromisoformat(run["completed_at"].replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if started_at.tzinfo is None or completed_at.tzinfo is None:
+        return None
+    elapsed_seconds = (completed_at - started_at).total_seconds()
+    return elapsed_seconds if elapsed_seconds >= 0 else None
+
+
+def _format_elapsed_run_time(elapsed_seconds: float | None) -> str:
+    """Render persisted wall time or an explicit unavailable value."""
+    return f"{elapsed_seconds:.3f} seconds" if elapsed_seconds is not None else "Unavailable"
 
 
 def _write_jsonl_atomic(path: Path, records: list[dict[str, Any]]) -> None:

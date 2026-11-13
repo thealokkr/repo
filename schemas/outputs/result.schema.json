@@ -16,6 +16,7 @@
     "reason",
     "draft_response",
     "draft",
+    "generated_labels",
     "handoff",
     "guardrails",
     "generation",
@@ -73,6 +74,95 @@
       "type": [
         "string",
         "null"
+      ]
+    },
+    "generated_labels": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "intent",
+            "urgency",
+            "expected_route",
+            "answerable_from_docs",
+            "expected_doc_ids",
+            "must_not_auto_respond"
+          ],
+          "properties": {
+            "intent": {
+              "enum": [
+                "account",
+                "account_access",
+                "account_compromise",
+                "api",
+                "api_key_issue",
+                "api_usage_question",
+                "authentication",
+                "authentication_failure",
+                "billing",
+                "billing_dispute",
+                "billing_query",
+                "compliance",
+                "compliance_request",
+                "configuration_help",
+                "data",
+                "data_export",
+                "data_location",
+                "data_residency",
+                "database_issue",
+                "deployment",
+                "deployment_failure",
+                "feature_request",
+                "integration",
+                "integration_help",
+                "onboarding",
+                "other",
+                "performance",
+                "performance_degradation",
+                "quota_or_overage",
+                "rate_limit",
+                "roadmap_request",
+                "rollback_request",
+                "security",
+                "security_incident",
+                "sso_configuration",
+                "unclear_request",
+                "webhook_issue"
+              ]
+            },
+            "urgency": {
+              "enum": [
+                "high",
+                "medium",
+                "low",
+                "unknown"
+              ]
+            },
+            "expected_route": {
+              "enum": [
+                "draft_for_review",
+                "escalate",
+                "degrade"
+              ]
+            },
+            "answerable_from_docs": {
+              "type": "boolean"
+            },
+            "expected_doc_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "must_not_auto_respond": {
+              "type": "boolean"
+            }
+          }
+        }
       ]
     },
     "draft": {

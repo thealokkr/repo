@@ -51,6 +51,7 @@ from cloudserve_support.persistence.runtime_database import (
 from cloudserve_support.reporting.output_schemas import load_output_schemas
 from cloudserve_support.reporting.run_exports import (
     record_batch_export_duration,
+    write_markdown_run_metrics,
     write_run_exports,
 )
 from cloudserve_support.processing.run_provenance import (
@@ -397,6 +398,11 @@ def run_ticket_batch(
             metrics=metrics,
             output_directory=output_directory,
             duration_seconds=max(time.perf_counter() - export_started, 0.0),
+        )
+        write_markdown_run_metrics(
+            connection,
+            run_id=run_id,
+            output_directory=output_directory,
         )
         return run_id, output_directory, metrics
     except Exception as error:

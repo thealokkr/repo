@@ -12,6 +12,27 @@ from cloudserve_support.classification.ticket_classification import INTENT_VALUE
 
 OUTPUT_SCHEMA_DIRECTORY = Path(__file__).resolve().parents[3] / "schemas" / "outputs"
 INTENT_SCHEMA = {"enum": sorted(INTENT_VALUES)}
+GENERATED_LABELS_SCHEMA = {
+    "oneOf": [
+        {"type": "null"},
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "intent", "urgency", "expected_route", "answerable_from_docs",
+                "expected_doc_ids", "must_not_auto_respond",
+            ],
+            "properties": {
+                "intent": INTENT_SCHEMA,
+                "urgency": {"enum": ["high", "medium", "low", "unknown"]},
+                "expected_route": {"enum": ["draft_for_review", "escalate", "degrade"]},
+                "answerable_from_docs": {"type": "boolean"},
+                "expected_doc_ids": {"type": "array", "items": {"type": "string"}},
+                "must_not_auto_respond": {"type": "boolean"},
+            },
+        },
+    ]
+}
 CALIBRATION_SOURCE_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -748,8 +769,8 @@ OUTPUT_SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
             "run_id", "input_index", "ticket_id", "channel", "route", "status",
             "processing_duration_seconds", "draft_generation_request_duration_seconds",
             "processing_latency_seconds",
-            "reason", "draft_response", "draft", "handoff", "guardrails", "generation",
-            "sources", "classification", "routing",
+            "reason", "draft_response", "draft", "generated_labels", "handoff",
+            "guardrails", "generation", "sources", "classification", "routing",
         ],
         "properties": {
             "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
@@ -764,6 +785,7 @@ OUTPUT_SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
             "reason": {"type": "string", "minLength": 1},
             "draft_response": {"type": ["string", "null"]},
             "draft": {"oneOf": [DRAFT_SCHEMA, {"type": "null"}]},
+            "generated_labels": GENERATED_LABELS_SCHEMA,
             "handoff": {"oneOf": [HANDOFF_SCHEMA, {"type": "null"}]},
             "guardrails": GUARDRAILS_SCHEMA,
             "generation": GENERATION_SCHEMA,
