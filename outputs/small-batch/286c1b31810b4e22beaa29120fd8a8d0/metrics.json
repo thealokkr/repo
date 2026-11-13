@@ -1,0 +1,1533 @@
+{
+  "run_id": "286c1b31810b4e22beaa29120fd8a8d0",
+  "total_count": 3,
+  "completed_count": 0,
+  "failed_count": 3,
+  "exception_count": 3,
+  "route_counts": {
+    "draft_for_review": 0,
+    "escalate": 0,
+    "degrade": 3
+  },
+  "batch_export_duration_seconds": 0.22260549999191426,
+  "evaluation": {
+    "report_version": 1,
+    "run_id": "286c1b31810b4e22beaa29120fd8a8d0",
+    "source_set": "external",
+    "input_ref": "data/incoming/classification-diagnostic-3.json",
+    "input_sha256": "48ac353bd57d80448e5463023b4e897d62ed53d341bd61f4982c33e6eb65df27",
+    "evaluated_at_utc": "2026-11-13T12:56:55.075553Z",
+    "sample_count": 3,
+    "evaluation_data": {
+      "labels_record_count": 3,
+      "history_record_count": 0,
+      "labels_used_after_processing": true,
+      "history_used_after_processing": true
+    },
+    "integrity": {
+      "status": "complete",
+      "expected_count": 3,
+      "result_count": 3,
+      "decision_count": 3,
+      "missing_result_indices": [],
+      "mismatched_indices": [],
+      "duplicate_ticket_ids": [],
+      "errors": []
+    },
+    "policy_provenance": {
+      "status": "available",
+      "policy": {
+        "policy_version": "cs003-v5",
+        "classification_confidence_threshold": 0.74,
+        "threshold_source": "development operational confidence distribution",
+        "calibration_method": "20th percentile nearest rank, clamped to [0.65, 0.98]",
+        "calibration_source": {
+          "confidence_sample_count": 384,
+          "evaluation_fields_used": false,
+          "excluded_invalid_records": 0,
+          "failed_classifications": 0,
+          "input_ref": "data/tickets/development_tickets.json",
+          "operational_sha256": "52b8896e3564566c94b2fb2fd2ef9de529cda5aa4b82bcdfc071a3d970e5ac69",
+          "source_set": "development",
+          "total_records": 500,
+          "valid_operational_records": 500
+        },
+        "frozen": true,
+        "policy_file_sha256": "c90f2407b7246ce19508077f54a2c3d3ce6970230e632189dd01067c909185c6",
+        "threshold_sha256": "17eff4b275ffea8dd5e159353836e6b02634ade89b9855213c0f2ef2253555a5",
+        "classifier_implementation_sha256": "5e0d332fa4afd8dc84dbdec51517e2d7b49514b0fe34188eb3c8bd4259bcdf5c",
+        "classifier_model_sha256": "2e1eeca06e613daf5baa490fa87f9ddef02785a4407a08a53f982db8ef70ff76"
+      },
+      "consistent": true,
+      "fingerprint_status": "available",
+      "fingerprints": {
+        "policy_file_sha256": "c90f2407b7246ce19508077f54a2c3d3ce6970230e632189dd01067c909185c6",
+        "threshold_sha256": "17eff4b275ffea8dd5e159353836e6b02634ade89b9855213c0f2ef2253555a5",
+        "classifier_implementation_sha256": "5e0d332fa4afd8dc84dbdec51517e2d7b49514b0fe34188eb3c8bd4259bcdf5c",
+        "classifier_model_sha256": "2e1eeca06e613daf5baa490fa87f9ddef02785a4407a08a53f982db8ef70ff76"
+      },
+      "sample_size": 3,
+      "classifier_providers": [
+        "openai"
+      ],
+      "classifier_model_names": [
+        "gpt-6-luna"
+      ]
+    },
+    "run_observed": {
+      "volume": {
+        "tickets_processed": 3,
+        "drafts_for_agent_review": 0,
+        "escalated": 0,
+        "degraded": 3,
+        "blocked_by_guardrails": 3
+      },
+      "business": {
+        "first_contact_resolution": {
+          "value": null,
+          "status": "unavailable",
+          "numerator": null,
+          "denominator": 0,
+          "sample_size": 3,
+          "missing_count": 3,
+          "note": "This CLI does not send replies or observe ticket resolution."
+        },
+        "first_response_time_minutes_mean": {
+          "value": null,
+          "status": "unavailable",
+          "numerator": null,
+          "denominator": 0,
+          "sample_size": 3,
+          "missing_count": 3,
+          "note": "This CLI does not send replies or record first-response timestamps."
+        },
+        "first_response_time_minutes_median": {
+          "value": null,
+          "status": "unavailable",
+          "numerator": null,
+          "denominator": 0,
+          "sample_size": 3,
+          "missing_count": 3,
+          "note": "This CLI does not send replies or record first-response timestamps."
+        },
+        "escalation_rate": {
+          "value": 0.0,
+          "status": "available",
+          "numerator": 0,
+          "denominator": 3,
+          "sample_size": 3,
+          "missing_count": 0,
+          "note": null
+        },
+        "historical_resolution_time_minutes_mean": {
+          "value": null,
+          "status": "unavailable",
+          "numerator": null,
+          "denominator": 0,
+          "sample_size": 3,
+          "missing_count": 3,
+          "note": "History field resolution_time_minutes is missing or invalid."
+        },
+        "historical_resolution_time_minutes_median": {
+          "value": null,
+          "status": "unavailable",
+          "numerator": null,
+          "denominator": 0,
+          "sample_size": 3,
+          "missing_count": 3,
+          "note": "History field resolution_time_minutes is missing or invalid."
+        }
+      },
+      "technical": {
+        "classification": {
+          "status": "available",
+          "sample_size": 3,
+          "missing_count": 0,
+          "missing_prediction_count": 0,
+          "invalid_prediction_count": 0,
+          "accuracy": {
+            "value": 0.0,
+            "status": "available",
+            "numerator": 0,
+            "denominator": 3,
+            "sample_size": 3,
+            "missing_count": 0,
+            "note": null
+          },
+          "precision_target": 0.85,
+          "precision_target_status": "below_target",
+          "precision_classes_with_support": 3,
+          "precision_classes_meeting_target": 0,
+          "precision_target_note": "Development-set calibration criterion only; classes without labeled support or predictions are not applicable and do not count as meeting the target.",
+          "per_class": {
+            "api_usage_question": {
+              "precision": {
+                "value": null,
+                "status": "not_applicable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 0,
+                "missing_count": 0,
+                "note": "No labeled support or no predictions for this class."
+              },
+              "recall": {
+                "value": 0.0,
+                "status": "available",
+                "numerator": 0,
+                "denominator": 1,
+                "sample_size": 1,
+                "missing_count": 0,
+                "note": null
+              },
+              "support": 1,
+              "predicted_count": 0,
+              "missing_prediction_count": 0,
+              "precision_target_status": "not_applicable"
+            },
+            "deployment_failure": {
+              "precision": {
+                "value": null,
+                "status": "not_applicable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 0,
+                "missing_count": 0,
+                "note": "No labeled support or no predictions for this class."
+              },
+              "recall": {
+                "value": 0.0,
+                "status": "available",
+                "numerator": 0,
+                "denominator": 1,
+                "sample_size": 1,
+                "missing_count": 0,
+                "note": null
+              },
+              "support": 1,
+              "predicted_count": 0,
+              "missing_prediction_count": 0,
+              "precision_target_status": "not_applicable"
+            },
+            "quota_or_overage": {
+              "precision": {
+                "value": null,
+                "status": "not_applicable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 0,
+                "missing_count": 0,
+                "note": "No labeled support or no predictions for this class."
+              },
+              "recall": {
+                "value": 0.0,
+                "status": "available",
+                "numerator": 0,
+                "denominator": 1,
+                "sample_size": 1,
+                "missing_count": 0,
+                "note": null
+              },
+              "support": 1,
+              "predicted_count": 0,
+              "missing_prediction_count": 0,
+              "precision_target_status": "not_applicable"
+            },
+            "unclear_request": {
+              "precision": {
+                "value": null,
+                "status": "not_applicable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 0,
+                "missing_count": 0,
+                "note": "No labeled support or no predictions for this class."
+              },
+              "recall": {
+                "value": null,
+                "status": "not_applicable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 0,
+                "missing_count": 0,
+                "note": "No labeled support for this class."
+              },
+              "support": 0,
+              "predicted_count": 3,
+              "missing_prediction_count": 0,
+              "precision_target_status": "not_applicable"
+            }
+          },
+          "confusion_matrix": {
+            "api_usage_question": {
+              "unclear_request": 1
+            },
+            "deployment_failure": {
+              "unclear_request": 1
+            },
+            "quota_or_overage": {
+              "unclear_request": 1
+            }
+          },
+          "confidence_calibration": [
+            {
+              "lower_bound": 0.0,
+              "upper_bound": 0.2,
+              "sample_size": 3,
+              "mean_confidence": 0.0,
+              "observed_accuracy": 0.0
+            }
+          ]
+        },
+        "urgency": {
+          "status": "available",
+          "precision_target": 0.7,
+          "target_status": "below_target",
+          "precision_classes_with_support": 3,
+          "precision_classes_meeting_target": 0,
+          "precision_target_note": "Project-set target: at least 70% precision for each urgency class with labeled support. Classes without labeled support or predictions are not applicable and do not count as meeting the target.",
+          "exact_match_rate": {
+            "value": 0.0,
+            "status": "available",
+            "numerator": 0,
+            "denominator": 3,
+            "sample_size": 3,
+            "missing_count": 0,
+            "note": null
+          },
+          "sample_size": 3,
+          "missing_prediction_count": 0,
+          "invalid_prediction_count": 0,
+          "per_class": {
+            "high": {
+              "precision": {
+                "value": null,
+                "status": "not_applicable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 0,
+                "missing_count": 0,
+                "note": "No predictions for this urgency class."
+              },
+              "recall": {
+                "value": 0.0,
+                "status": "available",
+                "numerator": 0,
+                "denominator": 1,
+                "sample_size": 1,
+                "missing_count": 0,
+                "note": null
+              },
+              "support": 1,
+              "predicted_count": 0,
+              "precision_target_status": "not_applicable"
+            },
+            "low": {
+              "precision": {
+                "value": null,
+                "status": "not_applicable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 0,
+                "missing_count": 0,
+                "note": "No predictions for this urgency class."
+              },
+              "recall": {
+                "value": 0.0,
+                "status": "available",
+                "numerator": 0,
+                "denominator": 1,
+                "sample_size": 1,
+                "missing_count": 0,
+                "note": null
+              },
+              "support": 1,
+              "predicted_count": 0,
+              "precision_target_status": "not_applicable"
+            },
+            "medium": {
+              "precision": {
+                "value": null,
+                "status": "not_applicable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 0,
+                "missing_count": 0,
+                "note": "No predictions for this urgency class."
+              },
+              "recall": {
+                "value": 0.0,
+                "status": "available",
+                "numerator": 0,
+                "denominator": 1,
+                "sample_size": 1,
+                "missing_count": 0,
+                "note": null
+              },
+              "support": 1,
+              "predicted_count": 0,
+              "precision_target_status": "not_applicable"
+            },
+            "unknown": {
+              "precision": {
+                "value": 0.0,
+                "status": "available",
+                "numerator": 0,
+                "denominator": 3,
+                "sample_size": 3,
+                "missing_count": 0,
+                "note": null
+              },
+              "recall": {
+                "value": null,
+                "status": "not_applicable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 0,
+                "missing_count": 0,
+                "note": "No labeled support for this urgency class."
+              },
+              "support": 0,
+              "predicted_count": 3,
+              "precision_target_status": "not_applicable"
+            }
+          },
+          "confusion_matrix": {
+            "high": {
+              "unknown": 1
+            },
+            "low": {
+              "unknown": 1
+            },
+            "medium": {
+              "unknown": 1
+            }
+          },
+          "prioritization_error_counts": {
+            "under_prioritized": 3
+          },
+          "prioritization_errors": [
+            {
+              "input_index": 0,
+              "ticket_id": "DEV-0001",
+              "expected": "high",
+              "predicted": "unknown",
+              "direction": "under_prioritized"
+            },
+            {
+              "input_index": 1,
+              "ticket_id": "DEV-0027",
+              "expected": "medium",
+              "predicted": "unknown",
+              "direction": "under_prioritized"
+            },
+            {
+              "input_index": 2,
+              "ticket_id": "DEV-0044",
+              "expected": "low",
+              "predicted": "unknown",
+              "direction": "under_prioritized"
+            }
+          ],
+          "note": "Urgency precision is reported against the project-set target; recall, exact agreement, and prioritization trade-offs remain diagnostic."
+        },
+        "route_accuracy": {
+          "value": 0.0,
+          "status": "available",
+          "numerator": 0,
+          "denominator": 3,
+          "sample_size": 3,
+          "missing_count": 0,
+          "note": null
+        },
+        "route_quality": {
+          "sample_size": 3,
+          "missing_count": 0,
+          "unavailable_prediction_count": 0,
+          "confusion_matrix": {
+            "draft_for_review": {
+              "__unavailable_prediction__": 0,
+              "degrade": 3,
+              "draft_for_review": 0,
+              "escalate": 0
+            }
+          },
+          "expected_counts": {
+            "draft_for_review": 3
+          },
+          "predicted_counts": {
+            "degrade": 3
+          },
+          "false_escalation": {
+            "count": 0,
+            "denominator": 3,
+            "rate": 0.0
+          },
+          "unsafe_automation_route": {
+            "count": 0,
+            "denominator": 0,
+            "rate": null
+          },
+          "route_deviation_count": 3,
+          "other_deviation_count": 3,
+          "threshold_provenance": {
+            "status": "available",
+            "policy": {
+              "policy_version": "cs003-v5",
+              "classification_confidence_threshold": 0.74,
+              "threshold_source": "development operational confidence distribution",
+              "calibration_method": "20th percentile nearest rank, clamped to [0.65, 0.98]",
+              "calibration_source": {
+                "confidence_sample_count": 384,
+                "evaluation_fields_used": false,
+                "excluded_invalid_records": 0,
+                "failed_classifications": 0,
+                "input_ref": "data/tickets/development_tickets.json",
+                "operational_sha256": "52b8896e3564566c94b2fb2fd2ef9de529cda5aa4b82bcdfc071a3d970e5ac69",
+                "source_set": "development",
+                "total_records": 500,
+                "valid_operational_records": 500
+              },
+              "frozen": true,
+              "policy_file_sha256": "c90f2407b7246ce19508077f54a2c3d3ce6970230e632189dd01067c909185c6",
+              "threshold_sha256": "17eff4b275ffea8dd5e159353836e6b02634ade89b9855213c0f2ef2253555a5",
+              "classifier_implementation_sha256": "5e0d332fa4afd8dc84dbdec51517e2d7b49514b0fe34188eb3c8bd4259bcdf5c",
+              "classifier_model_sha256": "2e1eeca06e613daf5baa490fa87f9ddef02785a4407a08a53f982db8ef70ff76"
+            },
+            "consistent": true,
+            "fingerprint_status": "available",
+            "fingerprints": {
+              "policy_file_sha256": "c90f2407b7246ce19508077f54a2c3d3ce6970230e632189dd01067c909185c6",
+              "threshold_sha256": "17eff4b275ffea8dd5e159353836e6b02634ade89b9855213c0f2ef2253555a5",
+              "classifier_implementation_sha256": "5e0d332fa4afd8dc84dbdec51517e2d7b49514b0fe34188eb3c8bd4259bcdf5c",
+              "classifier_model_sha256": "2e1eeca06e613daf5baa490fa87f9ddef02785a4407a08a53f982db8ef70ff76"
+            },
+            "sample_size": 3,
+            "classifier_providers": [
+              "openai"
+            ],
+            "classifier_model_names": [
+              "gpt-6-luna"
+            ]
+          },
+          "note": "Trade-offs are measured at the frozen policy threshold. The unsafe-automation route count means a draft route where the label expects escalation; drafts remain unsent, and automatic sends are checked separately. No route-accuracy cutoff is specified."
+        },
+        "answerability": {
+          "status": "available",
+          "accuracy": {
+            "value": 0.0,
+            "status": "available",
+            "numerator": 0,
+            "denominator": 3,
+            "sample_size": 3,
+            "missing_count": 0,
+            "note": null
+          },
+          "sample_size": 3,
+          "missing_label_count": 0,
+          "missing_evidence_readiness_count": 0,
+          "missing_count": 0,
+          "confusion_matrix": {
+            "false": {
+              "false": 0,
+              "true": 0,
+              "__unavailable_prediction__": 0
+            },
+            "true": {
+              "false": 3,
+              "true": 0,
+              "__unavailable_prediction__": 0
+            }
+          },
+          "evidence_readiness_counts": {
+            "false": 3
+          },
+          "retrieval_status_counts": {
+            "unavailable": 3
+          },
+          "note": "This compares answerable_from_docs labels with the persisted routing evidence_ready signal. It measures evidence availability, not semantic answerability; retrieval_hit_rate separately checks expected document IDs. Missing readiness remains in the labeled denominator as an unavailable prediction and is counted above."
+        },
+        "retrieval_hit_rate": {
+          "value": 0.0,
+          "status": "available",
+          "numerator": 0,
+          "denominator": 3,
+          "sample_size": 3,
+          "missing_count": 0,
+          "note": null
+        },
+        "citation_resolution": {
+          "value": null,
+          "status": "not_applicable",
+          "numerator": 0,
+          "denominator": 0,
+          "sample_size": 0,
+          "missing_count": 0,
+          "note": "No citations were generated."
+        },
+        "citation_source_integrity": {
+          "checked_at_utc": "2026-11-13T12:56:55.074981Z",
+          "run_result_count": 3,
+          "generated_draft_count": 0,
+          "claim_count": 0,
+          "citation_count": 0,
+          "citation_resolution": {
+            "value": null,
+            "status": "not_applicable",
+            "numerator": 0,
+            "denominator": 0,
+            "sample_size": 0,
+            "missing_count": 0,
+            "note": "No citations were generated."
+          },
+          "eligible_source_provenance": {
+            "value": null,
+            "status": "not_applicable",
+            "numerator": 0,
+            "denominator": 0,
+            "sample_size": 0,
+            "missing_count": 0,
+            "note": "No citations were generated."
+          },
+          "claim_excerpt_match": {
+            "value": null,
+            "status": "not_applicable",
+            "numerator": 0,
+            "denominator": 0,
+            "sample_size": 0,
+            "missing_count": 0,
+            "note": "No citation-to-claim pairs were generated."
+          },
+          "claim_traceability": {
+            "value": null,
+            "status": "not_applicable",
+            "numerator": 0,
+            "denominator": 0,
+            "sample_size": 0,
+            "missing_count": 0,
+            "note": "No factual claims were generated."
+          },
+          "claims_missing_citations": 0,
+          "claims_with_source_id_mismatch": 0,
+          "failure_counts": {},
+          "expected_document_coverage": {
+            "value": 0.0,
+            "status": "available",
+            "numerator": 0,
+            "denominator": 3,
+            "sample_size": 3,
+            "missing_count": 0,
+            "note": null
+          },
+          "expected_document_count": 3,
+          "expected_document_hit_count": 0,
+          "missing_expected_document_label_count": 0,
+          "semantic_quality": {
+            "semantic_citation_support": {
+              "status": "not_measured",
+              "reason": "This mechanical source-integrity section does not assess semantic support. See evaluation.criteria.llm_judge for the separate model-estimated sample."
+            },
+            "whole_answer_correctness": {
+              "status": "not_measured",
+              "reason": "Whole-answer correctness is not mechanically established by citation integrity. See evaluation.criteria.llm_judge for the separate model-estimated sample."
+            },
+            "human_rated_citation_accuracy": {
+              "status": "not_measured",
+              "reason": "Human-rated citation accuracy remains unmeasured; see evaluation.criteria.llm_judge for a separate model-estimated citation-support sample."
+            },
+            "hallucination": {
+              "status": "not_measured",
+              "reason": "Mechanical excerpt matching does not establish hallucination. See evaluation.criteria.llm_judge for a separate model-estimated sample."
+            }
+          },
+          "note": "Citation resolution, source eligibility, and exact excerpt checks are mechanical integrity checks. They do not establish semantic citation support, whole-answer correctness, or hallucination."
+        },
+        "coverage": {
+          "value": 0.0,
+          "status": "available",
+          "numerator": 0,
+          "denominator": 3,
+          "sample_size": 3,
+          "missing_count": 0,
+          "note": null
+        },
+        "availability": {
+          "value": 0.0,
+          "status": "available",
+          "numerator": 0,
+          "denominator": 3,
+          "sample_size": 3,
+          "missing_count": 0,
+          "note": null
+        },
+        "latency": {
+          "median_seconds": {
+            "value": 8.308259416997316,
+            "status": "available",
+            "numerator": null,
+            "denominator": 3,
+            "sample_size": 3,
+            "missing_count": 0,
+            "note": null
+          },
+          "p95_seconds": {
+            "value": 8.311178584001027,
+            "status": "available",
+            "numerator": null,
+            "denominator": 3,
+            "sample_size": 3,
+            "missing_count": 0,
+            "note": null
+          }
+        },
+        "generation_inclusive_processing_duration": {
+          "median_seconds": {
+            "value": 8.308259416997316,
+            "status": "available",
+            "numerator": null,
+            "denominator": 3,
+            "sample_size": 3,
+            "missing_count": 0,
+            "note": null
+          },
+          "p95_seconds": {
+            "value": 8.311178584001027,
+            "status": "available",
+            "numerator": null,
+            "denominator": 3,
+            "sample_size": 3,
+            "missing_count": 0,
+            "note": null
+          }
+        },
+        "draft_generation_request_duration": {
+          "median_seconds": {
+            "value": 0.0,
+            "status": "available",
+            "numerator": null,
+            "denominator": 3,
+            "sample_size": 3,
+            "missing_count": 0,
+            "note": null
+          },
+          "p95_seconds": {
+            "value": 0.0,
+            "status": "available",
+            "numerator": null,
+            "denominator": 3,
+            "sample_size": 3,
+            "missing_count": 0,
+            "note": null
+          }
+        },
+        "decision_log_reconciliation": {
+          "value": 1.0,
+          "status": "available",
+          "numerator": 3,
+          "denominator": 3,
+          "sample_size": 3,
+          "missing_count": 0,
+          "note": null
+        }
+      },
+      "governance": {
+        "logged_decisions": {
+          "value": 1.0,
+          "status": "available",
+          "numerator": 3,
+          "denominator": 3,
+          "sample_size": 3,
+          "missing_count": 0,
+          "note": null
+        },
+        "guardrail_activations": {
+          "citation_grounding": {
+            "value": 0.0,
+            "status": "available",
+            "numerator": 0,
+            "denominator": 3,
+            "sample_size": 3,
+            "missing_count": 0,
+            "note": null
+          },
+          "instruction_integrity": {
+            "value": 0.0,
+            "status": "available",
+            "numerator": 0,
+            "denominator": 3,
+            "sample_size": 3,
+            "missing_count": 0,
+            "note": null
+          },
+          "output_structure": {
+            "value": 0.0,
+            "status": "available",
+            "numerator": 0,
+            "denominator": 3,
+            "sample_size": 3,
+            "missing_count": 0,
+            "note": null
+          },
+          "private_data_input": {
+            "value": 0.0,
+            "status": "available",
+            "numerator": 0,
+            "denominator": 3,
+            "sample_size": 3,
+            "missing_count": 0,
+            "note": null
+          },
+          "private_data_output": {
+            "value": 0.0,
+            "status": "available",
+            "numerator": 0,
+            "denominator": 3,
+            "sample_size": 3,
+            "missing_count": 0,
+            "note": null
+          },
+          "private_data_source": {
+            "value": 0.0,
+            "status": "available",
+            "numerator": 0,
+            "denominator": 3,
+            "sample_size": 3,
+            "missing_count": 0,
+            "note": null
+          },
+          "prompt_injection": {
+            "value": 0.0,
+            "status": "available",
+            "numerator": 0,
+            "denominator": 3,
+            "sample_size": 3,
+            "missing_count": 0,
+            "note": null
+          },
+          "source_eligibility": {
+            "value": 1.0,
+            "status": "available",
+            "numerator": 3,
+            "denominator": 3,
+            "sample_size": 3,
+            "missing_count": 0,
+            "note": null
+          }
+        },
+        "private_output_guardrail": {
+          "value": 0.0,
+          "status": "available",
+          "numerator": 0,
+          "denominator": 3,
+          "sample_size": 3,
+          "missing_count": 0,
+          "note": null
+        },
+        "frozen_policy": {
+          "status": "available",
+          "policy": {
+            "policy_version": "cs003-v5",
+            "classification_confidence_threshold": 0.74,
+            "threshold_source": "development operational confidence distribution",
+            "calibration_method": "20th percentile nearest rank, clamped to [0.65, 0.98]",
+            "calibration_source": {
+              "confidence_sample_count": 384,
+              "evaluation_fields_used": false,
+              "excluded_invalid_records": 0,
+              "failed_classifications": 0,
+              "input_ref": "data/tickets/development_tickets.json",
+              "operational_sha256": "52b8896e3564566c94b2fb2fd2ef9de529cda5aa4b82bcdfc071a3d970e5ac69",
+              "source_set": "development",
+              "total_records": 500,
+              "valid_operational_records": 500
+            },
+            "frozen": true,
+            "policy_file_sha256": "c90f2407b7246ce19508077f54a2c3d3ce6970230e632189dd01067c909185c6",
+            "threshold_sha256": "17eff4b275ffea8dd5e159353836e6b02634ade89b9855213c0f2ef2253555a5",
+            "classifier_implementation_sha256": "5e0d332fa4afd8dc84dbdec51517e2d7b49514b0fe34188eb3c8bd4259bcdf5c",
+            "classifier_model_sha256": "2e1eeca06e613daf5baa490fa87f9ddef02785a4407a08a53f982db8ef70ff76"
+          },
+          "consistent": true,
+          "fingerprint_status": "available",
+          "fingerprints": {
+            "policy_file_sha256": "c90f2407b7246ce19508077f54a2c3d3ce6970230e632189dd01067c909185c6",
+            "threshold_sha256": "17eff4b275ffea8dd5e159353836e6b02634ade89b9855213c0f2ef2253555a5",
+            "classifier_implementation_sha256": "5e0d332fa4afd8dc84dbdec51517e2d7b49514b0fe34188eb3c8bd4259bcdf5c",
+            "classifier_model_sha256": "2e1eeca06e613daf5baa490fa87f9ddef02785a4407a08a53f982db8ef70ff76"
+          },
+          "sample_size": 3,
+          "classifier_providers": [
+            "openai"
+          ],
+          "classifier_model_names": [
+            "gpt-6-luna"
+          ]
+        },
+        "protected_case_safety": {
+          "protected_case_count": 0,
+          "checked_protected_case_count": 0,
+          "missing_protected_result_count": 0,
+          "protected_automatic_send_violation_count": 0,
+          "protected_route_deviation_count": 0,
+          "protected_route_deviations": [],
+          "all_ticket_automatic_send_count": 0,
+          "all_ticket_automatic_send_checked_count": 3,
+          "all_ticket_automatic_send_check_denominator": 3,
+          "zero_tolerance_status": "pass",
+          "note": "Every protected case must escalate and no ticket is automatically sent. Route deviations and automatic sends are reported separately; draft_for_review remains an unsent draft."
+        }
+      }
+    },
+    "criteria": {
+      "runtime_latency": {
+        "status": "fail",
+        "target": "p95 < 3.0 seconds",
+        "value": 8.311178584001027,
+        "numerator": null,
+        "denominator": 3,
+        "sample_size": 3,
+        "missing_count": 0,
+        "note": "Nearest-rank p95 of processing_latency_seconds, calculated as full per-ticket processing_duration_seconds through the matching SQLite result/audit commit minus only draft_generation_request_duration_seconds. Batch export and the post-run quality judge are reported separately; this is not customer response time."
+      },
+      "availability": {
+        "status": "non_gating",
+        "target": "99.5% availability target excluded from the Release 1 CLI gate under PRD v2.3",
+        "value": null,
+        "numerator": null,
+        "denominator": 0,
+        "sample_size": 0,
+        "missing_count": 0,
+        "note": "A one-off batch has no uptime observation window or availability-event denominator. Batch completion is not availability."
+      },
+      "private_data_output": {
+        "status": "not_measurable",
+        "target": "0 detected private-data occurrences in every generated draft",
+        "value": 0,
+        "numerator": 0,
+        "denominator": 0,
+        "sample_size": 0,
+        "missing_count": 0,
+        "note": "The output guardrail's blocked check count is used as the detected-occurrence count; every generated draft must have a recorded check."
+      },
+      "decision_audit_coverage": {
+        "status": "pass",
+        "target": "exactly one matching persisted decision/audit record per processed ticket",
+        "value": 1.0,
+        "numerator": 3,
+        "denominator": 3,
+        "sample_size": 3,
+        "missing_count": 0,
+        "note": "Counts SQLite-backed decision events that match one result by input index, ticket ID, and action; requires complete result/input/audit reconciliation."
+      },
+      "confidence_calibration": {
+        "status": "pass",
+        "target": "absolute confidence-to-accuracy error <= 5% per populated band",
+        "value": 0.0,
+        "numerator": null,
+        "denominator": 3,
+        "sample_size": 3,
+        "missing_count": 0,
+        "note": "Compares mean confidence with observed intent accuracy separately in each populated confidence band.",
+        "populated_bands": [
+          {
+            "lower_bound": 0.0,
+            "upper_bound": 0.2,
+            "mean_confidence": 0.0,
+            "observed_accuracy": 0.0,
+            "absolute_error": 0.0,
+            "sample_size": 3
+          }
+        ]
+      },
+      "group_quality_variation": {
+        "status": "not_measurable",
+        "target": "maximum comparable group gap < 5%",
+        "value": null,
+        "numerator": null,
+        "denominator": 24,
+        "sample_size": 6,
+        "missing_count": 0,
+        "note": "Only intent, urgency, route, and evidence-readiness agreement label comparisons are used. A dimension is comparable when each named group has at least 5 labeled examples and no missing labels or evidence. These model measures do not represent realized customer outcomes.",
+        "dimensions": {
+          "language_fluency": {
+            "sample_size": 3,
+            "missing_segment_count": 0,
+            "measures": {
+              "intent_accuracy": {
+                "status": "not_measurable",
+                "value": null,
+                "denominator": 3,
+                "sample_size": 3,
+                "missing_count": 0,
+                "segments": [
+                  {
+                    "group": "fluent",
+                    "value": 0.0,
+                    "numerator": 0,
+                    "denominator": 1,
+                    "sample_size": 1,
+                    "missing_count": 0
+                  },
+                  {
+                    "group": "non_fluent",
+                    "value": 0.0,
+                    "numerator": 0,
+                    "denominator": 2,
+                    "sample_size": 2,
+                    "missing_count": 0
+                  }
+                ]
+              },
+              "urgency_accuracy": {
+                "status": "not_measurable",
+                "value": null,
+                "denominator": 3,
+                "sample_size": 3,
+                "missing_count": 0,
+                "segments": [
+                  {
+                    "group": "fluent",
+                    "value": 0.0,
+                    "numerator": 0,
+                    "denominator": 1,
+                    "sample_size": 1,
+                    "missing_count": 0
+                  },
+                  {
+                    "group": "non_fluent",
+                    "value": 0.0,
+                    "numerator": 0,
+                    "denominator": 2,
+                    "sample_size": 2,
+                    "missing_count": 0
+                  }
+                ]
+              },
+              "route_accuracy": {
+                "status": "not_measurable",
+                "value": null,
+                "denominator": 3,
+                "sample_size": 3,
+                "missing_count": 0,
+                "segments": [
+                  {
+                    "group": "fluent",
+                    "value": 0.0,
+                    "numerator": 0,
+                    "denominator": 1,
+                    "sample_size": 1,
+                    "missing_count": 0
+                  },
+                  {
+                    "group": "non_fluent",
+                    "value": 0.0,
+                    "numerator": 0,
+                    "denominator": 2,
+                    "sample_size": 2,
+                    "missing_count": 0
+                  }
+                ]
+              },
+              "answerability_evidence_readiness_agreement": {
+                "status": "not_measurable",
+                "value": null,
+                "denominator": 3,
+                "sample_size": 3,
+                "missing_count": 0,
+                "segments": [
+                  {
+                    "group": "fluent",
+                    "value": 0.0,
+                    "numerator": 0,
+                    "denominator": 1,
+                    "sample_size": 1,
+                    "missing_count": 0
+                  },
+                  {
+                    "group": "non_fluent",
+                    "value": 0.0,
+                    "numerator": 0,
+                    "denominator": 2,
+                    "sample_size": 2,
+                    "missing_count": 0
+                  }
+                ]
+              }
+            }
+          },
+          "customer_tier": {
+            "sample_size": 3,
+            "missing_segment_count": 0,
+            "measures": {
+              "intent_accuracy": {
+                "status": "not_measurable",
+                "value": null,
+                "denominator": 3,
+                "sample_size": 3,
+                "missing_count": 0,
+                "segments": [
+                  {
+                    "group": "business",
+                    "value": 0.0,
+                    "numerator": 0,
+                    "denominator": 1,
+                    "sample_size": 1,
+                    "missing_count": 0
+                  },
+                  {
+                    "group": "standard",
+                    "value": 0.0,
+                    "numerator": 0,
+                    "denominator": 2,
+                    "sample_size": 2,
+                    "missing_count": 0
+                  }
+                ]
+              },
+              "urgency_accuracy": {
+                "status": "not_measurable",
+                "value": null,
+                "denominator": 3,
+                "sample_size": 3,
+                "missing_count": 0,
+                "segments": [
+                  {
+                    "group": "business",
+                    "value": 0.0,
+                    "numerator": 0,
+                    "denominator": 1,
+                    "sample_size": 1,
+                    "missing_count": 0
+                  },
+                  {
+                    "group": "standard",
+                    "value": 0.0,
+                    "numerator": 0,
+                    "denominator": 2,
+                    "sample_size": 2,
+                    "missing_count": 0
+                  }
+                ]
+              },
+              "route_accuracy": {
+                "status": "not_measurable",
+                "value": null,
+                "denominator": 3,
+                "sample_size": 3,
+                "missing_count": 0,
+                "segments": [
+                  {
+                    "group": "business",
+                    "value": 0.0,
+                    "numerator": 0,
+                    "denominator": 1,
+                    "sample_size": 1,
+                    "missing_count": 0
+                  },
+                  {
+                    "group": "standard",
+                    "value": 0.0,
+                    "numerator": 0,
+                    "denominator": 2,
+                    "sample_size": 2,
+                    "missing_count": 0
+                  }
+                ]
+              },
+              "answerability_evidence_readiness_agreement": {
+                "status": "not_measurable",
+                "value": null,
+                "denominator": 3,
+                "sample_size": 3,
+                "missing_count": 0,
+                "segments": [
+                  {
+                    "group": "business",
+                    "value": 0.0,
+                    "numerator": 0,
+                    "denominator": 1,
+                    "sample_size": 1,
+                    "missing_count": 0
+                  },
+                  {
+                    "group": "standard",
+                    "value": 0.0,
+                    "numerator": 0,
+                    "denominator": 2,
+                    "sample_size": 2,
+                    "missing_count": 0
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "business_outcomes": {
+        "status": "excluded",
+        "target": null,
+        "value": null,
+        "numerator": null,
+        "denominator": 0,
+        "sample_size": 0,
+        "missing_count": 0,
+        "note": "First-response time, first-contact resolution, satisfaction, actual escalation outcomes, repeat contacts, and resolution outcomes require downstream agent or customer actions this not-sent CLI does not perform. Historical fixtures remain labeled as baselines and are not scored as current-run performance."
+      }
+    },
+    "historical_baseline": {
+      "source": "input.history",
+      "sample_size": 0,
+      "input_sample_size": 3,
+      "causal_claim_about_this_run": false,
+      "overall": {
+        "first_contact_resolution": {
+          "value": null,
+          "status": "unavailable",
+          "numerator": null,
+          "denominator": 0,
+          "sample_size": 3,
+          "missing_count": 3,
+          "note": "History field first_contact_resolution is missing or invalid."
+        },
+        "escalation_rate": {
+          "value": null,
+          "status": "unavailable",
+          "numerator": null,
+          "denominator": 0,
+          "sample_size": 3,
+          "missing_count": 3,
+          "note": "History field escalated is missing or invalid."
+        },
+        "repeat_contact_rate": {
+          "value": null,
+          "status": "unavailable",
+          "numerator": null,
+          "denominator": 0,
+          "sample_size": 3,
+          "missing_count": 3,
+          "note": "History field repeat_contact is missing or invalid."
+        },
+        "csat_mean": {
+          "value": null,
+          "status": "unavailable",
+          "numerator": null,
+          "denominator": 0,
+          "sample_size": 3,
+          "missing_count": 3,
+          "note": "History field csat_rating is missing or invalid."
+        },
+        "resolution_time_minutes_mean": {
+          "value": null,
+          "status": "unavailable",
+          "numerator": null,
+          "denominator": 0,
+          "sample_size": 3,
+          "missing_count": 3,
+          "note": "History field resolution_time_minutes is missing or invalid."
+        },
+        "resolution_time_minutes_median": {
+          "value": null,
+          "status": "unavailable",
+          "numerator": null,
+          "denominator": 0,
+          "sample_size": 3,
+          "missing_count": 3,
+          "note": "History field resolution_time_minutes is missing or invalid."
+        },
+        "first_response_time_minutes": {
+          "value": null,
+          "status": "unavailable",
+          "numerator": null,
+          "denominator": 0,
+          "sample_size": 3,
+          "missing_count": 3,
+          "note": "Historical records do not contain first-response timestamps."
+        }
+      },
+      "segments": {
+        "language_fluency": {
+          "fluent": {
+            "sample_size": 1,
+            "metrics": {
+              "first_contact_resolution": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 1,
+                "missing_count": 1,
+                "note": "History field first_contact_resolution is missing or invalid."
+              },
+              "escalation_rate": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 1,
+                "missing_count": 1,
+                "note": "History field escalated is missing or invalid."
+              },
+              "repeat_contact_rate": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 1,
+                "missing_count": 1,
+                "note": "History field repeat_contact is missing or invalid."
+              },
+              "csat_mean": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 1,
+                "missing_count": 1,
+                "note": "History field csat_rating is missing or invalid."
+              },
+              "resolution_time_minutes_mean": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 1,
+                "missing_count": 1,
+                "note": "History field resolution_time_minutes is missing or invalid."
+              },
+              "resolution_time_minutes_median": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 1,
+                "missing_count": 1,
+                "note": "History field resolution_time_minutes is missing or invalid."
+              },
+              "first_response_time_minutes": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 1,
+                "missing_count": 1,
+                "note": "Historical records do not contain first-response timestamps."
+              }
+            }
+          },
+          "non_fluent": {
+            "sample_size": 2,
+            "metrics": {
+              "first_contact_resolution": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 2,
+                "missing_count": 2,
+                "note": "History field first_contact_resolution is missing or invalid."
+              },
+              "escalation_rate": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 2,
+                "missing_count": 2,
+                "note": "History field escalated is missing or invalid."
+              },
+              "repeat_contact_rate": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 2,
+                "missing_count": 2,
+                "note": "History field repeat_contact is missing or invalid."
+              },
+              "csat_mean": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 2,
+                "missing_count": 2,
+                "note": "History field csat_rating is missing or invalid."
+              },
+              "resolution_time_minutes_mean": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 2,
+                "missing_count": 2,
+                "note": "History field resolution_time_minutes is missing or invalid."
+              },
+              "resolution_time_minutes_median": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 2,
+                "missing_count": 2,
+                "note": "History field resolution_time_minutes is missing or invalid."
+              },
+              "first_response_time_minutes": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 2,
+                "missing_count": 2,
+                "note": "Historical records do not contain first-response timestamps."
+              }
+            }
+          }
+        },
+        "customer_tier": {
+          "business": {
+            "sample_size": 1,
+            "metrics": {
+              "first_contact_resolution": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 1,
+                "missing_count": 1,
+                "note": "History field first_contact_resolution is missing or invalid."
+              },
+              "escalation_rate": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 1,
+                "missing_count": 1,
+                "note": "History field escalated is missing or invalid."
+              },
+              "repeat_contact_rate": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 1,
+                "missing_count": 1,
+                "note": "History field repeat_contact is missing or invalid."
+              },
+              "csat_mean": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 1,
+                "missing_count": 1,
+                "note": "History field csat_rating is missing or invalid."
+              },
+              "resolution_time_minutes_mean": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 1,
+                "missing_count": 1,
+                "note": "History field resolution_time_minutes is missing or invalid."
+              },
+              "resolution_time_minutes_median": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 1,
+                "missing_count": 1,
+                "note": "History field resolution_time_minutes is missing or invalid."
+              },
+              "first_response_time_minutes": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 1,
+                "missing_count": 1,
+                "note": "Historical records do not contain first-response timestamps."
+              }
+            }
+          },
+          "standard": {
+            "sample_size": 2,
+            "metrics": {
+              "first_contact_resolution": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 2,
+                "missing_count": 2,
+                "note": "History field first_contact_resolution is missing or invalid."
+              },
+              "escalation_rate": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 2,
+                "missing_count": 2,
+                "note": "History field escalated is missing or invalid."
+              },
+              "repeat_contact_rate": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 2,
+                "missing_count": 2,
+                "note": "History field repeat_contact is missing or invalid."
+              },
+              "csat_mean": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 2,
+                "missing_count": 2,
+                "note": "History field csat_rating is missing or invalid."
+              },
+              "resolution_time_minutes_mean": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 2,
+                "missing_count": 2,
+                "note": "History field resolution_time_minutes is missing or invalid."
+              },
+              "resolution_time_minutes_median": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 2,
+                "missing_count": 2,
+                "note": "History field resolution_time_minutes is missing or invalid."
+              },
+              "first_response_time_minutes": {
+                "value": null,
+                "status": "unavailable",
+                "numerator": null,
+                "denominator": 0,
+                "sample_size": 2,
+                "missing_count": 2,
+                "note": "Historical records do not contain first-response timestamps."
+              }
+            }
+          }
+        }
+      }
+    },
+    "limitations": [
+      "Historical outcomes describe the fixture's prior support process and are not caused by this CLI run.",
+      "Scored per-ticket processing latency excludes only draft-generation request wait; generation-inclusive processing duration and request wait are reported separately. First-response time and first-contact resolution are unavailable because this CLI drafts or escalates and does not send or resolve tickets.",
+      "Historical resolution-time measures are fixture baselines, not response times caused by this CLI run.",
+      "Citation resolution and exact excerpt grounding are mechanical checks; semantic model-judged estimates are recorded separately in evaluation.criteria.llm_judge.",
+      "Customer satisfaction is historical fixture data; this run did not collect live customer feedback or human ratings."
+    ]
+  }
+}

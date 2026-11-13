@@ -14,12 +14,6 @@ dist/
 .env.*
 !.env.example
 
-# Local runtime records and generated run exports
-data/runtime/*
-!data/runtime/.gitkeep
-outputs/*
-!outputs/.gitkeep
-
 # OS/editor noise
 .DS_Store
 .workarea/
