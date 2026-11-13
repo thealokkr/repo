@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -28,7 +28,7 @@ def _result(*, input_index: int, ticket_id: str) -> dict[str, object]:
         "article_version": "test-1.0",
         "content_sha256": "1" * 64,
         "metadata_manifest_sha256": "2" * 64,
-        "reviewed_at": date.today().isoformat(),
+        "reviewed_at": (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat(),
         "review_interval_days": 365,
     }
     return {
@@ -349,8 +349,7 @@ def test_malformed_development_labels_fail_reconciliation_and_block_precision_pa
             "evaluation": report,
         },
     )
-    assert summary["intent_precision_target"]["status"] == "invalid_evaluation_data"
-    assert "bogus_intent" not in summary["intent_quality"]
+    assert summary["classification_accuracy"]["status"] == "invalid_evaluation_data"
 
 
 def test_invalid_predictions_are_counted_as_unavailable_not_as_new_classes(

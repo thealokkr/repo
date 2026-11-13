@@ -9,8 +9,12 @@ from google import genai
 import pytest
 
 from cloudserve_support.classification.ticket_classification import (
+    CLASSIFICATION_QUESTIONS_PER_TICKET,
+    CLASSIFICATION_TICKETS_PER_BATCH,
+    DECISIONS_API_MAX_TICKETS,
     DECISIONS_CLASSIFIER_MODEL,
     DECISIONS_MAX_INPUT_BYTES,
+    DECISIONS_MAX_QUESTIONS,
     INTENT_VALUES,
     URGENCY_VALUES,
     _ticket_batch_input,
@@ -21,10 +25,16 @@ from cloudserve_support.config import Settings
 from cloudserve_support.ingestion.ticket_normalization import normalize_ticket_record
 
 
-def test_local_classifier_chunks_201_tickets_and_maps_failed_chunk_positions(
+def test_local_classifier_chunks_at_most_25_tickets_and_maps_failed_chunk_positions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Check the 200-ticket boundary and failed-chunk mapping without network calls."""
+    """Verify application chunks are capped at 25 tickets (80 tickets split 25+25+25+5) and failed chunks map correctly."""
+    assert CLASSIFICATION_TICKETS_PER_BATCH == 25
+    assert DECISIONS_MAX_QUESTIONS == 400
+    assert DECISIONS_API_MAX_TICKETS == 200
+    assert CLASSIFICATION_QUESTIONS_PER_TICKET == 2
+
+    # Verify 80-ticket workload splits into 25 + 25 + 25 + 5
     tickets = tuple(
         normalize_ticket_record(
             {
@@ -35,22 +45,27 @@ def test_local_classifier_chunks_201_tickets_and_maps_failed_chunk_positions(
             },
             input_index=index,
         )
-        for index in range(201)
+        for index in range(80)
     )
 
     chunks = _ticket_classification_chunks(tickets)
-    assert [start_index for start_index, _ in chunks] == [0, 200]
-    assert [len(chunk_tickets) for _, chunk_tickets in chunks] == [200, 1]
+    assert [start_index for start_index, _ in chunks] == [0, 25, 50, 75]
+    assert [len(chunk_tickets) for _, chunk_tickets in chunks] == [25, 25, 25, 5]
     serialized_sizes = [
         len(_ticket_batch_input(chunk_tickets).encode("utf-8"))
         for _, chunk_tickets in chunks
     ]
     assert all(size <= DECISIONS_MAX_INPUT_BYTES for size in serialized_sizes)
 
+    # Also verify 26 tickets split into 25 + 1 boundary
+    chunks_26 = _ticket_classification_chunks(tickets[:26])
+    assert [start_index for start_index, _ in chunks_26] == [0, 25]
+    assert [len(chunk_tickets) for _, chunk_tickets in chunks_26] == [25, 1]
+
     recorded_requests: list[dict[str, object]] = []
 
     class LocalDecisionsApi:
-        """Return predictable choices and fail the third local request only."""
+        """Return predictable choices and fail the first chunk only."""
 
         def create(self, **request: object) -> object:
             ticket_fields = json.loads(str(request["input"]))["tickets"]
@@ -106,10 +121,11 @@ def test_local_classifier_chunks_201_tickets_and_maps_failed_chunk_positions(
         Settings(gemini_api_key="local-test-key"),
     )
 
-    assert [batch.start_index for batch in batches] == [0, 200]
-    assert [len(batch.classifications) for batch in batches] == [200, 1]
-    assert [len(request["ticket_indexes"]) for request in recorded_requests] == [200, 1]
-    assert [request["question_count"] for request in recorded_requests] == [400, 2]
+    assert [batch.start_index for batch in batches] == [0, 25, 50, 75]
+    assert [len(batch.classifications) for batch in batches] == [25, 25, 25, 5]
+    assert [len(request["ticket_indexes"]) for request in recorded_requests] == [25, 25, 25, 5]
+    assert [request["question_count"] for request in recorded_requests] == [50, 50, 50, 10]
+    assert all(request["question_count"] <= DECISIONS_MAX_QUESTIONS for request in recorded_requests)
     assert all(request["input_bytes"] <= DECISIONS_MAX_INPUT_BYTES for request in recorded_requests)
 
     mapped_classifications = [
@@ -117,11 +133,11 @@ def test_local_classifier_chunks_201_tickets_and_maps_failed_chunk_positions(
         for batch in batches
         for offset, classification in enumerate(batch.classifications)
     ]
-    assert [ticket_index for ticket_index, _ in mapped_classifications] == list(range(201))
+    assert [ticket_index for ticket_index, _ in mapped_classifications] == list(range(80))
     assert all(classification.intent in INTENT_VALUES for _, classification in mapped_classifications)
     assert all(classification.urgency in URGENCY_VALUES for _, classification in mapped_classifications)
     for ticket_index, classification in mapped_classifications:
-        if 0 <= ticket_index < 200:
+        if 0 <= ticket_index < 25:
             assert classification.provider_status == "fallback"
             assert classification.intent == "unclear_request"
             assert classification.urgency == "unknown"
@@ -137,8 +153,10 @@ def test_local_classifier_chunks_201_tickets_and_maps_failed_chunk_positions(
             assert classification.urgency == expected_urgency
 
     assert [request["ticket_indexes"] for request in recorded_requests] == [
-        list(range(0, 200)),
-        [200],
+        list(range(0, 25)),
+        list(range(25, 50)),
+        list(range(50, 75)),
+        list(range(75, 80)),
     ]
 
 

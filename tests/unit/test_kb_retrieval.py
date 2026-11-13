@@ -1259,7 +1259,7 @@ def test_batch_escalates_after_query_embedding_timeout_and_processes_later_ticke
     assert results[0]["routing"]["retrieval"]["status"] == "unavailable"
     assert results[0]["routing"]["retrieval"]["reason_code"] == "query_embedding_timeout"
     assert results[0]["sources"] == []
-    assert results[0]["route"] == "escalate"
+    assert results[0]["predicted_route"] == "escalate"
     assert results[1]["routing"]["retrieval"]["status"] == "ready"
     assert results[1]["sources"][0]["doc_id"] == "DOC-DEPLOY-001"
     assert results[1]["status"] == "completed"
