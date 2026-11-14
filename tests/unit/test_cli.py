@@ -18,14 +18,19 @@ def test_run_startup_failure_returns_exit_status_one(monkeypatch, capsys) -> Non
     assert "input path is unavailable" in capsys.readouterr().err
 
 
-def test_run_prints_stage_progress_and_only_run_name_and_metrics(
+def test_run_prints_stage_progress_output_folder_and_metrics_table(
     tmp_path: Path,
     monkeypatch,
     capsys,
 ) -> None:
     output_directory = tmp_path / "run-123"
     output_directory.mkdir()
-    metrics_content = "# Run metrics\n\n- Total tickets: 1"
+    metrics_content = (
+        "# Run metrics\n\n"
+        "| Label | Matched | Different | Not compared | Match rate |\n"
+        "| --- | ---: | ---: | ---: | ---: |\n"
+        "| intent | 1 | 0 | 0 | 100.0% |"
+    )
     (output_directory / "metrics.md").write_text(metrics_content, encoding="utf-8")
 
     def fake_run_ticket_batch(**kwargs):
@@ -51,7 +56,8 @@ def test_run_prints_stage_progress_and_only_run_name_and_metrics(
     output = capsys.readouterr().out
     assert "Classification in progress..." in output
     assert "Classification done." in output
-    assert "Run name: quick acceptance" in output
+    assert f"Output folder: {output_directory}" in output
+    assert "Metrics (metrics.md):" in output
     assert metrics_content in output
     assert "internal_metric_dump" not in output
     assert "Development evaluation summary:" not in output

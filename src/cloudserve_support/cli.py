@@ -65,7 +65,10 @@ def build_parser() -> argparse.ArgumentParser:
             f"(default: {DEFAULT_ROUTING_POLICY_CONFIG_PATH})"
         ),
     )
-    run_parser.add_argument("--label", help="Optional human-readable label stored with this run")
+    run_parser.add_argument(
+        "--label",
+        help="Optional run label stored with the run and used to name its output folder",
+    )
 
     calibrate_parser = commands.add_parser(
         "calibrate",
@@ -194,7 +197,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     try:
-        run_id, output_directory, _metrics = run_ticket_batch(
+        _run_id, output_directory, _metrics = run_ticket_batch(
             input_path=parsed.input,
             output_root=parsed.output_root,
             database_path=parsed.database,
@@ -211,8 +214,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except OSError as error:
         print(f"cloudserve: could not read metrics output: {error}", file=sys.stderr)
         return 1
-    print(f"Run name: {parsed.label or run_id}")
-    print(f"Metrics: {metrics_path}")
+    print(f"Output folder: {output_directory}")
+    print("Metrics (metrics.md):")
     print(metrics_output)
     return 0
 

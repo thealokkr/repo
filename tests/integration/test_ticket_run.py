@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -158,13 +159,16 @@ def test_one_ticket_run_persists_label_audit_and_schema_valid_exports(
         input_path=input_path,
         output_root=tmp_path / "outputs",
         database_path=tmp_path / "runtime.sqlite3",
-        label="cs001-tracer",
+        label="cs001 tracer",
         retriever=_ReadyRetriever(),
         policy_path=TEST_ROUTING_POLICY_PATH,
         progress_callback=lambda stage, status: progress_events.append((stage, status)),
     )
 
-    assert output_directory.name == run_id
+    assert re.fullmatch(
+        r"cs001-tracer_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}",
+        output_directory.name,
+    )
     assert progress_events == [
         ("Classification", "in_progress"),
         ("Classification", "done"),
@@ -250,7 +254,7 @@ def test_one_ticket_run_persists_label_audit_and_schema_valid_exports(
         run_row = connection.execute(
             "SELECT run_id, label, output_dir, status FROM processing_runs"
         ).fetchone()
-        assert run_row == (run_id, "cs001-tracer", str(output_directory), "completed")
+        assert run_row == (run_id, "cs001 tracer", str(output_directory), "completed")
         assert connection.execute("SELECT COUNT(*) FROM ticket_runs WHERE run_id = ?", (run_id,)).fetchone()[0] == 1
         audit_row = connection.execute(
             "SELECT event_id, ticket_id, event_payload_json, sources_json FROM audit_events "

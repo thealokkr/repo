@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 import uuid
@@ -124,14 +125,20 @@ def run_ticket_batch(
     resolved_output_root = output_root.expanduser().resolve()
     resolved_database_path = database_path.expanduser().resolve()
     run_id = uuid.uuid4().hex
-    output_directory = resolved_output_root / run_id
+    started_datetime = datetime.now(timezone.utc)
+    started_at = started_datetime.isoformat().replace("+00:00", "Z")
+    output_directory_name = _run_output_directory_name(
+        label=label,
+        started_datetime=started_datetime,
+        run_id=run_id,
+    )
+    output_directory = resolved_output_root / output_directory_name
 
     connection = connect_runtime_database(resolved_database_path)
     run_record_committed = False
     try:
         resolved_output_root.mkdir(parents=True, exist_ok=True)
         output_directory.mkdir(exist_ok=False)
-        started_at = _utc_timestamp()
         connection.execute("BEGIN IMMEDIATE")
         create_processing_run(
             connection,
@@ -760,6 +767,21 @@ def _prepare_ticket_records(input_records: list[Any]) -> list[_PreparedTicket]:
             )
         )
     return prepared_tickets
+
+
+def _run_output_directory_name(
+    *,
+    label: str | None,
+    started_datetime: datetime,
+    run_id: str,
+) -> str:
+    """Build a safe label-and-UTC-minute folder name, or use the run ID without a label."""
+    if label is None or not label.strip():
+        return run_id
+    safe_label = re.sub(r"[^A-Za-z0-9._-]+", "-", label.strip()).strip("-._")
+    if not safe_label:
+        return run_id
+    return f"{safe_label}_{started_datetime:%Y-%m-%d_%H-%M}"
 
 
 def _utc_timestamp() -> str:
