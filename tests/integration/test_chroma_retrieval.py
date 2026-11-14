@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -174,7 +175,9 @@ def test_normalized_ticket_returns_ranked_chroma_passages_from_packaged_source(
     )
 
 
-def test_packaged_index_returns_current_source_ids_without_embedding_service() -> None:
+def test_packaged_index_returns_current_source_ids_without_embedding_service(
+    tmp_path: Path,
+) -> None:
     """The checked-in index is source-current and can retrieve with a local test vector."""
     repo_root = Path(__file__).resolve().parents[2]
     source_path = repo_root / "data" / "kb" / "documentation.json"
@@ -194,7 +197,10 @@ def test_packaged_index_returns_current_source_ids_without_embedding_service() -
         if record["metadata"]["doc_id"] == "DOC-DEPLOY-001"
         and record["metadata"]["approval_status"] == "approved"
     )
-    chroma_client = chromadb.PersistentClient(path=str(repo_root / "data" / "index" / "chroma"))
+    # Copy packaged index to a disposable directory to avoid touching tracked data/index/chroma
+    temp_index = tmp_path / "index"
+    shutil.copytree(repo_root / "data" / "index", temp_index)
+    chroma_client = chromadb.PersistentClient(path=str(temp_index / "chroma"))
     collection = chroma_client.get_collection(COLLECTION_NAME, embedding_function=None)
     stored = collection.get(ids=[target["id"]], include=["embeddings"])
     retriever = KnowledgeRetriever(
@@ -205,7 +211,7 @@ def test_packaged_index_returns_current_source_ids_without_embedding_service() -
         ),
         source_path=source_path,
         metadata_path=metadata_path,
-        index_path=repo_root / "data" / "index",
+        index_path=temp_index,
         embedding_client=SimpleNamespace(
             embeddings=_StoredPassageEmbedding(stored["embeddings"][0].tolist())
         ),

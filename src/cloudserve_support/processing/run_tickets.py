@@ -9,7 +9,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from cloudserve_support.classification.ticket_classification import (
     DECISIONS_CLASSIFIER_MODEL,
@@ -100,6 +100,7 @@ def run_ticket_batch(
     label: str | None = None,
     retriever: KnowledgeRetriever | None = None,
     generator: DraftGenerationProvider | None = None,
+    progress_callback: Callable[[str, str], None] | None = None,
 ) -> tuple[str, Path, dict[str, Any]]:
     """Classify, retrieve, draft or hand off, and persist every ticket occurrence."""
     input_records = read_ticket_records(input_path)
@@ -163,6 +164,7 @@ def run_ticket_batch(
             for prepared_ticket in prepared_tickets
             if prepared_ticket.classification is None
         ]
+        _report_run_progress(progress_callback, "Classification", "in_progress")
         if classifiable_tickets:
             classification_batches = classify_ticket_batches(
                 [prepared_ticket.ticket for prepared_ticket in classifiable_tickets],
@@ -207,7 +209,9 @@ def run_ticket_batch(
                 model_name=classification.model_name,
                 prediction=classification.as_dict(),
             )
+        _report_run_progress(progress_callback, "Classification", "done")
 
+        _report_run_progress(progress_callback, "Retrieval", "in_progress")
         retrieval_results = _retrieve_ticket_results(
             prepared_tickets,
             retriever=knowledge_retriever,
@@ -234,7 +238,9 @@ def run_ticket_batch(
                 },
                 reason=retrieval.reason,
             )
+        _report_run_progress(progress_callback, "Retrieval", "done")
 
+        _report_run_progress(progress_callback, "Routing", "in_progress")
         for prepared_ticket in prepared_tickets:
             classification = prepared_ticket.classification
             if classification is None:
@@ -264,7 +270,9 @@ def run_ticket_batch(
                 value=asdict(decision),
                 reason=decision.reason,
             )
+        _report_run_progress(progress_callback, "Routing", "done")
 
+        _report_run_progress(progress_callback, "Ticket processing", "in_progress")
         for prepared_ticket in prepared_tickets:
             ticket_started = time.perf_counter()
             result, storage_ticket_id, ticket = _build_ticket_result(
@@ -377,7 +385,9 @@ def run_ticket_batch(
                 result_payload=terminal_payload,
             )
             connection.commit()
+        _report_run_progress(progress_callback, "Ticket processing", "done")
 
+        _report_run_progress(progress_callback, "Export finalization", "in_progress")
         export_started = time.perf_counter()
         metrics = write_run_exports(
             connection,
@@ -404,6 +414,7 @@ def run_ticket_batch(
             run_id=run_id,
             output_directory=output_directory,
         )
+        _report_run_progress(progress_callback, "Export finalization", "done")
         return run_id, output_directory, metrics
     except Exception as error:
         if connection.in_transaction:
@@ -422,6 +433,16 @@ def run_ticket_batch(
         raise
     finally:
         connection.close()
+
+
+def _report_run_progress(
+    progress_callback: Callable[[str, str], None] | None,
+    stage: str,
+    status: str,
+) -> None:
+    """Report a ticket-run stage transition when the CLI supplies a progress callback."""
+    if progress_callback is not None:
+        progress_callback(stage, status)
 
 
 def _commit_ticket_records(connection: sqlite3.Connection) -> None:

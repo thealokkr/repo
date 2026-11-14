@@ -51,6 +51,14 @@ LABEL_PROJECTION_FIELDS = (
     ("expected_doc_ids", "doc_ids"),
     ("must_not_auto_respond", "must_not_auto_respond"),
 )
+FAILED_KPI_NAMES = {
+    "intent": "intent",
+    "urgency": "urgency",
+    "expected_route": "route",
+    "answerable_from_docs": "answerability",
+    "expected_doc_ids": "expected_doc_ids",
+    "must_not_auto_respond": "must_not_auto_respond",
+}
 _UNPAIRED_SURROGATE_PATTERN = re.compile(r"[\ud800-\udfff]")
 
 
@@ -237,6 +245,10 @@ def write_run_exports(
     _write_jsonl_atomic(output_directory / "decision_log.jsonl", decisions)
     _write_json_atomic(output_directory / "metrics.json", metrics)
     _write_jsonl_atomic(output_directory / "exceptions.jsonl", exceptions)
+    _write_json_atomic(
+        output_directory / "failed_records.json",
+        _build_failed_records_report(run_id=run_id, results=exported_results),
+    )
     return metrics
 
 
@@ -321,6 +333,51 @@ def _project_diagnostic_result(
     ]
     row["processing_latency_seconds"] = result["processing_latency_seconds"]
     return row
+
+
+def _build_failed_records_report(
+    *,
+    run_id: str,
+    results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """List ticket IDs and label KPIs that failed their post-run comparison."""
+    failed_records: list[dict[str, Any]] = []
+    for result in results:
+        failed_kpis: list[str] = []
+        for label_field, output_suffix in LABEL_PROJECTION_FIELDS:
+            expected = result.get(f"expected_{output_suffix}")
+            predicted = result.get(f"predicted_{output_suffix}")
+            if not _valid_label_value(label_field, expected, generated=False):
+                continue
+            if not _valid_label_value(label_field, predicted, generated=True):
+                failed_kpis.append(FAILED_KPI_NAMES[label_field])
+                continue
+            if label_field == "expected_doc_ids":
+                is_match = set(expected) == set(predicted)
+            else:
+                expected_value = (
+                    EXPECTED_ROUTE_ALIASES.get(expected, expected)
+                    if label_field == "expected_route"
+                    else expected
+                )
+                is_match = expected_value == predicted
+            if not is_match:
+                failed_kpis.append(FAILED_KPI_NAMES[label_field])
+
+        if failed_kpis:
+            failed_records.append(
+                {
+                    "input_index": result["input_index"],
+                    "ticket_id": result["ticket_id"],
+                    "failed_kpis": failed_kpis,
+                }
+            )
+
+    return {
+        "run_id": run_id,
+        "failed_record_count": len(failed_records),
+        "failed_records": failed_records,
+    }
 
 
 def _preserve_nonempty_input_string(value: Any) -> str | None:
@@ -424,20 +481,6 @@ def write_markdown_run_metrics(
             f"| {field} | {matched_counts[field]} | {different_counts[field]} | "
             f"{not_compared_count} | {match_rate} |"
         )
-    lines.extend(
-        [
-            "",
-            "Label snapshots are evaluation-only and are read from SQLite after processing; "
-            "they are never supplied to inference. `expected_route` maps the input-only "
-            "`auto_respond` alias to the actual `draft_for_review` route; drafts remain unsent.",
-            "`answerable_from_docs` compares to the persisted evidence-readiness proxy, and "
-            "`must_not_auto_respond` compares to the protected-case proxy; neither is a "
-            "semantic ground-truth judgment. Document IDs compare as unordered sets.",
-            "Missing, invalid, or unavailable values are counted as not compared and are "
-            "excluded from each field's match-rate denominator.",
-            "",
-        ]
-    )
     _replace_file_atomically(output_directory / "metrics.md", "\n".join(lines))
 
 

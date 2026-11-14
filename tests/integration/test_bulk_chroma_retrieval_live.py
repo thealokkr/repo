@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import shutil
 import sqlite3
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -414,15 +416,23 @@ def _build_live_retriever(
     *,
     embedding_recorder: RecordingGeminiEmbeddings | None = None,
     collection_recorder: RecordingPersistentCollection | None = None,
+    index_path: Path | None = None,
 ) -> tuple[KnowledgeRetriever, RecordingGeminiEmbeddings, RecordingPersistentCollection]:
-    """Use the real Gemini client and packaged persistent Chroma collection."""
+    """Use the real Gemini client and an isolated temporary copy of the persistent Chroma collection."""
     client = genai.Client(api_key=settings.require_gemini_api_key())
     embeddings = embedding_recorder or RecordingGeminiEmbeddings(client)
+    temp_dir_holder: tempfile.TemporaryDirectory[str] | None = None
+    if index_path is None:
+        # Copy packaged index to a disposable directory to avoid touching tracked data/index/chroma
+        temp_dir_holder = tempfile.TemporaryDirectory(prefix="chroma_live_test_")
+        index_path = Path(temp_dir_holder.name) / "index"
+        shutil.copytree(REPOSITORY_ROOT / "data" / "index", index_path)
+
     if collection_recorder is None:
         import chromadb
 
         chroma_client = chromadb.PersistentClient(
-            path=str(REPOSITORY_ROOT / "data" / "index" / "chroma")
+            path=str(index_path / "chroma")
         )
         collection = chroma_client.get_collection(
             name="cloudserve_kb",
@@ -433,10 +443,12 @@ def _build_live_retriever(
         settings,
         source_path=REPOSITORY_ROOT / "data" / "kb" / "documentation.json",
         metadata_path=REPOSITORY_ROOT / "data" / "kb" / "metadata_manifest.json",
-        index_path=REPOSITORY_ROOT / "data" / "index",
+        index_path=index_path,
         embedding_client=EmbeddingClientAdapter(embeddings),
         collection=collection_recorder,
     )
+    if temp_dir_holder is not None:
+        retriever._temp_dir_holder = temp_dir_holder
     assert retriever.unavailable_reason is None
     return retriever, embeddings, collection_recorder
 
@@ -540,7 +552,12 @@ def test_live_five_ticket_retrieval_smoke_matches_serial_and_commits_before_rout
     assert len(sanitized_hash) == 64
     input_path = tmp_path / "retrieval-smoke-5.json"
 
-    live_retriever, embeddings, collection = _build_live_retriever(settings)
+    # Copy packaged index to a disposable directory to avoid touching tracked data/index/chroma
+    temp_index = tmp_path / "index"
+    shutil.copytree(REPOSITORY_ROOT / "data" / "index", temp_index)
+    live_retriever, embeddings, collection = _build_live_retriever(
+        settings, index_path=temp_index
+    )
     embeddings.capture_phase = "serial"
     serial_results = tuple(live_retriever.retrieve(ticket) for ticket in tickets)
     embeddings.capture_phase = None
@@ -701,6 +718,7 @@ def test_live_five_ticket_retrieval_smoke_matches_serial_and_commits_before_rout
 
 
 def test_live_bulk_embedding_failure_is_chunk_local_and_later_chunks_continue(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Let Gemini reject one invalid-model chunk and verify later real chunks still work."""
@@ -709,7 +727,12 @@ def test_live_bulk_embedding_failure_is_chunk_local_and_later_chunks_continue(
     _, tickets = _smoke_tickets()
     client = genai.Client(api_key=settings.require_gemini_api_key())
     embeddings = RecordingGeminiEmbeddings(client, fail_call_number=2)
-    retriever, _, _ = _build_live_retriever(settings, embedding_recorder=embeddings)
+    # Copy packaged index to a disposable directory to avoid touching tracked data/index/chroma
+    temp_index = tmp_path / "index"
+    shutil.copytree(REPOSITORY_ROOT / "data" / "index", temp_index)
+    retriever, _, _ = _build_live_retriever(
+        settings, embedding_recorder=embeddings, index_path=temp_index
+    )
 
     results = retriever.retrieve_many(tickets, embedding_batch_size=2, query_batch_size=2)
 
@@ -724,6 +747,7 @@ def test_live_bulk_embedding_failure_is_chunk_local_and_later_chunks_continue(
 
 
 def test_live_bulk_chroma_dimension_failure_is_chunk_local_and_later_chunks_continue(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Let persistent Chroma reject one malformed vector chunk, then continue querying."""
@@ -732,12 +756,17 @@ def test_live_bulk_chroma_dimension_failure_is_chunk_local_and_later_chunks_cont
     _, tickets = _smoke_tickets()
     import chromadb
 
+    # Copy packaged index to a disposable directory to avoid touching tracked data/index/chroma
+    temp_index = tmp_path / "index"
+    shutil.copytree(REPOSITORY_ROOT / "data" / "index", temp_index)
     chroma_client = chromadb.PersistentClient(
-        path=str(REPOSITORY_ROOT / "data" / "index" / "chroma")
+        path=str(temp_index / "chroma")
     )
     real_collection = chroma_client.get_collection("cloudserve_kb", embedding_function=None)
     collection = RecordingPersistentCollection(real_collection, fail_call_number=1)
-    retriever, embeddings, _ = _build_live_retriever(settings, collection_recorder=collection)
+    retriever, embeddings, _ = _build_live_retriever(
+        settings, collection_recorder=collection, index_path=temp_index
+    )
 
     results = retriever.retrieve_many(tickets, embedding_batch_size=2, query_batch_size=2)
 

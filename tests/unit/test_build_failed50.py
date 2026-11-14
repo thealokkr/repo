@@ -274,3 +274,71 @@ def test_build_failed_sample_end_to_end_and_determinism(tmp_path: Path) -> None:
     assert manifest["sample_size"] == 3
     assert manifest["sample_sha256"] == hash_1
     assert len(manifest["tickets"]) == 3
+
+
+def test_deduplication_of_duplicate_input_index_or_ticket_id() -> None:
+    """Ensure duplicate input_index or ticket_id rows are deduped to unique tickets."""
+    original_tickets = [
+        {"ticket_id": "TICKET-0", "body": "Zero"},
+        {"ticket_id": "TICKET-1", "body": "One"},
+    ]
+
+    # Two rows with input_index 0 (TICKET-0), one with input_index 1 (TICKET-1)
+    results_rows = [
+        {
+            "input_index": 0,
+            "ticket_id": "TICKET-0",
+            "processing_latency_seconds": 1.0,
+            "expected_intent": "a",
+            "predicted_intent": "b",
+        },
+        {
+            "input_index": 0,
+            "ticket_id": "TICKET-0",
+            "processing_latency_seconds": 2.0,
+            "expected_intent": "a",
+            "predicted_intent": "b",
+        },
+        {
+            "input_index": 1,
+            "ticket_id": "TICKET-1",
+            "processing_latency_seconds": 0.5,
+            "expected_intent": "a",
+            "predicted_intent": "b",
+        },
+    ]
+
+    selected_tickets, manifest_entries = select_failed_records(
+        results_rows,
+        original_tickets,
+        max_tickets=50,
+    )
+
+    # Must yield exactly 2 unique tickets, not 3
+    assert len(selected_tickets) == 2
+    assert [t["ticket_id"] for t in selected_tickets] == ["TICKET-0", "TICKET-1"]
+    assert len(manifest_entries) == 2
+    assert [m["ticket_id"] for m in manifest_entries] == ["TICKET-0", "TICKET-1"]
+
+
+def test_max_tickets_validation_bounds() -> None:
+    """Ensure max_tickets must be within 1..50 bounds."""
+    original_tickets = [{"ticket_id": "T0", "body": "Test"}]
+    results_rows = [{"input_index": 0, "ticket_id": "T0", "expected_intent": "a", "predicted_intent": "b"}]
+
+    with pytest.raises(ValueError, match="max_tickets must be between 1 and 50"):
+        select_failed_records(results_rows, original_tickets, max_tickets=0)
+
+    with pytest.raises(ValueError, match="max_tickets must be between 1 and 50"):
+        select_failed_records(results_rows, original_tickets, max_tickets=51)
+
+    with pytest.raises(ValueError, match="max_tickets must be between 1 and 50"):
+        select_failed_records(results_rows, original_tickets, max_tickets=-5)
+
+    # Valid boundary values succeed
+    selected_1, _ = select_failed_records(results_rows, original_tickets, max_tickets=1)
+    assert len(selected_1) == 1
+
+    selected_50, _ = select_failed_records(results_rows, original_tickets, max_tickets=50)
+    assert len(selected_50) == 1
+

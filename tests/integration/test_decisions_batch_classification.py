@@ -9,13 +9,16 @@ from google import genai
 import pytest
 
 from cloudserve_support.classification.ticket_classification import (
+    CLASSIFICATION_DECISION_QUESTIONS,
     CLASSIFICATION_QUESTIONS_PER_TICKET,
     CLASSIFICATION_TICKETS_PER_BATCH,
     DECISIONS_API_MAX_TICKETS,
     DECISIONS_CLASSIFIER_MODEL,
     DECISIONS_MAX_INPUT_BYTES,
     DECISIONS_MAX_QUESTIONS,
+    INTENT_CRITERIA,
     INTENT_VALUES,
+    URGENCY_CRITERIA,
     URGENCY_VALUES,
     _ticket_batch_input,
     _ticket_classification_chunks,
@@ -234,3 +237,30 @@ def test_decisions_classifier_splits_before_serialized_input_byte_limit(
         (1, "api_usage_question"),
         (2, "api_usage_question"),
     ]
+
+
+def test_classification_criteria_and_owner_urgency_rubric() -> None:
+    """Verify criteria dictionary contracts and owner-confirmed urgency rubric boundaries."""
+    assert set(INTENT_CRITERIA.keys()) == INTENT_VALUES
+    assert set(URGENCY_CRITERIA.keys()) == URGENCY_VALUES
+
+    # Owner-confirmed urgency rubric boundaries
+    high_criterion = URGENCY_CRITERIA["high"]
+    assert "critical customer-facing outage" in high_criterion.lower()
+    assert "active security incident" in high_criterion.lower()
+    assert "account compromise" in high_criterion.lower()
+    assert "confirmed data loss or exposure" in high_criterion.lower()
+    assert "suspected exposure or compromise of credentials in a breach at another service" in high_criterion.lower()
+
+    medium_criterion = URGENCY_CRITERIA["medium"]
+    assert "bounded api key permission or access issues" in medium_criterion.lower()
+
+    low_criterion = URGENCY_CRITERIA["low"]
+    assert "routine invoice or billing" in low_criterion.lower()
+    assert "routine data-residency" in low_criterion.lower()
+
+    urgency_instructions = CLASSIFICATION_DECISION_QUESTIONS[1]["instructions"]
+    assert "routine invoice and data-residency questions are not high" in urgency_instructions.lower()
+    assert "suspected exposure or compromise of credentials in a breach at another service" in urgency_instructions.lower()
+    assert "even before confirmed misuse" in urgency_instructions.lower()
+

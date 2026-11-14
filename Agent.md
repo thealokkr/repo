@@ -35,6 +35,13 @@ This repository contains the self-contained CLI capstone for CloudServe Support 
 - Never package API keys or other secrets. Document any model-provider credential and network requirements for recipients.
 - Keep `.venv`, caches, secrets, local SQLite runtime state, and generated outputs out of a distributable ZIP unless a task explicitly calls for them. The packaged KB, ticket fixtures, and Chroma index are intentional project data.
 
+## Live provider CLI execution
+
+- For the current Gemini migration and validation work, all provider-backed CLI commands (`ingest`, `calibrate`, `run`, and `evaluate-quality`) must execute in the owner-designated CMUX terminal surface/pane named `p2`, never in an agent's own shell.
+- Before each command, inspect `p2` with `cmux read-screen`; require an idle shell prompt. Send the entire command as one line, capture the exit status and printed run directory, and inspect the resulting screen/artifacts. If `p2` is missing, busy, or cannot be targeted, stop and ask the owner; do not fall back to Bash or another pane.
+- Omit `--database` unless the owner explicitly directs otherwise; the canonical SQLite DB is `data/runtime/cloudserve.sqlite3`. Put only per-run exports under `outputs/`; Chroma stays under `data/index/chroma/`.
+- Independent reviewers must inspect the recorded `p2` output and existing artifacts; do not make duplicate live provider calls during review.
+
 ## Scope and behavior
 
 - The interface is CLI-first; a customer-facing UI is not required for Release 1.

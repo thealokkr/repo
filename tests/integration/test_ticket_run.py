@@ -153,6 +153,7 @@ def test_one_ticket_run_persists_label_audit_and_schema_valid_exports(
     input_path = tmp_path / "one-ticket.json"
     input_path.write_text(json.dumps([ticket]), encoding="utf-8")
 
+    progress_events: list[tuple[str, str]] = []
     run_id, output_directory, metrics = run_ticket_batch(
         input_path=input_path,
         output_root=tmp_path / "outputs",
@@ -160,12 +161,30 @@ def test_one_ticket_run_persists_label_audit_and_schema_valid_exports(
         label="cs001-tracer",
         retriever=_ReadyRetriever(),
         policy_path=TEST_ROUTING_POLICY_PATH,
+        progress_callback=lambda stage, status: progress_events.append((stage, status)),
     )
 
     assert output_directory.name == run_id
+    assert progress_events == [
+        ("Classification", "in_progress"),
+        ("Classification", "done"),
+        ("Retrieval", "in_progress"),
+        ("Retrieval", "done"),
+        ("Routing", "in_progress"),
+        ("Routing", "done"),
+        ("Ticket processing", "in_progress"),
+        ("Ticket processing", "done"),
+        ("Export finalization", "in_progress"),
+        ("Export finalization", "done"),
+    ]
     assert {path.name for path in output_directory.iterdir()} == {
-        "results.jsonl", "decision_log.jsonl", "metrics.json", "exceptions.jsonl",
+        "results.jsonl", "decision_log.jsonl", "metrics.json", "metrics.md",
+        "exceptions.jsonl", "failed_records.json",
     }
+    metrics_markdown = (output_directory / "metrics.md").read_text(encoding="utf-8")
+    assert "Label snapshots are evaluation-only" not in metrics_markdown
+    assert "evidence-readiness proxy" not in metrics_markdown
+    assert "Missing, invalid, or unavailable values" not in metrics_markdown
     results = _read_jsonl(output_directory / "results.jsonl")
     decisions = _read_jsonl(output_directory / "decision_log.jsonl")
     exceptions = _read_jsonl(output_directory / "exceptions.jsonl")
@@ -175,31 +194,34 @@ def test_one_ticket_run_persists_label_audit_and_schema_valid_exports(
     ]
     assert [decision["terminal"] for decision in decisions] == [False] * 4 + [True]
     assert all("action_taken" not in decision for decision in decisions[:-1])
-    assert decisions[-1]["result"] == results[0]
+    terminal_result = decisions[-1]["result"]
+    assert terminal_result["ticket_id"] == results[0]["ticket_id"]
+    assert results[0]["predicted_intent"] == terminal_result["classification"]["intent"]
+    assert results[0]["predicted_urgency"] == terminal_result["classification"]["urgency"]
+    assert results[0]["status"] == terminal_result["status"] == "completed"
     assert exceptions == []
-    assert results[0]["ticket_id"] == "DEV-0001"
-    assert results[0]["route"] == "draft_for_review"
-    assert results[0]["status"] == "completed"
-    assert results[0]["classification"]["intent"] == "deployment_failure"
-    assert results[0]["classification"]["confidence"] >= 0
-    assert results[0]["routing"]["policy_version"] == "cs003-v5"
-    assert results[0]["routing"]["policy_frozen"] is True
-    assert results[0]["routing"]["calibration_source"]["source_set"] == "development"
-    assert results[0]["routing"]["retrieval"]["status"] == "ready"
-    assert results[0]["sources"][0]["doc_id"] == "DOC-INT-001"
-    assert results[0]["draft"]["approval_required"] is True
-    assert results[0]["generation"]["reasoning_effort"] is None
-    assert results[0]["draft"]["send_status"] == "not_sent"
-    assert results[0]["draft"]["claims"][0]["source_ids"] == [
-        results[0]["sources"][0]["passage_id"]
+    assert terminal_result["ticket_id"] == "DEV-0001"
+    assert terminal_result["route"] == "draft_for_review"
+    assert terminal_result["classification"]["intent"] == "deployment_failure"
+    assert terminal_result["classification"]["confidence"] >= 0
+    assert terminal_result["routing"]["policy_version"] == "cs003-v5"
+    assert terminal_result["routing"]["policy_frozen"] is True
+    assert terminal_result["routing"]["calibration_source"]["source_set"] == "development"
+    assert terminal_result["routing"]["retrieval"]["status"] == "ready"
+    assert terminal_result["sources"][0]["doc_id"] == "DOC-INT-001"
+    assert terminal_result["draft"]["approval_required"] is True
+    assert terminal_result["generation"]["reasoning_effort"] is None
+    assert terminal_result["draft"]["send_status"] == "not_sent"
+    assert terminal_result["draft"]["claims"][0]["source_ids"] == [
+        terminal_result["sources"][0]["passage_id"]
     ]
     assert (
-        f"[citation:{results[0]['sources'][0]['passage_id']}]"
-        in results[0]["draft_response"]
+        f"[citation:{terminal_result['sources'][0]['passage_id']}]"
+        in terminal_result["draft_response"]
     )
-    assert results[0]["draft_response"].endswith("?")
-    assert results[0]["handoff"] is None
-    assert {check["check"] for check in results[0]["guardrails"]["checks"]} >= {
+    assert terminal_result["draft_response"].endswith("?")
+    assert terminal_result["handoff"] is None
+    assert {check["check"] for check in terminal_result["guardrails"]["checks"]} >= {
         "source_eligibility",
         "prompt_injection",
         "private_data_input",
@@ -238,8 +260,8 @@ def test_one_ticket_run_persists_label_audit_and_schema_valid_exports(
         assert audit_row is not None
         assert decisions[-1]["event_id"] == audit_row[0]
         assert audit_row[1] == "DEV-0001"
-        assert json.loads(audit_row[2])["result"] == results[0]
-        assert json.loads(audit_row[3]) == results[0]["sources"]
+        assert json.loads(audit_row[2])["result"] == terminal_result
+        assert json.loads(audit_row[3]) == terminal_result["sources"]
         audit_provenance = connection.execute(
         "SELECT model_name, prediction_json, alternatives_json, threshold_applied, requirement_ids_json, guardrail_results_json FROM audit_events WHERE run_id = ? AND event_type = 'ticket_completed'",
             (run_id,),
@@ -248,13 +270,13 @@ def test_one_ticket_run_persists_label_audit_and_schema_valid_exports(
         assert audit_provenance[0] == "gemini-decision-1"
         assert json.loads(audit_provenance[1])["intent"] == "deployment_failure"
         assert json.loads(audit_provenance[2]) == []
-        assert audit_provenance[3] == results[0]["routing"]["confidence_threshold"]
+        assert audit_provenance[3] == terminal_result["routing"]["confidence_threshold"]
         assert json.loads(audit_provenance[4]) == [
             "A3", "A4", "A5", "A6", "A7", "A11", "FR-01", "FR-02",
             "FR-03", "FR-04", "FR-05", "FR-06", "FR-07", "FR-08", "FR-11",
         ]
-        assert json.loads(audit_provenance[5])["matched_policy_rule"] == results[0]["routing"]["matched_rule"]
-        assert json.loads(audit_provenance[5])["checks"] == results[0]["guardrails"]["checks"]
+        assert json.loads(audit_provenance[5])["matched_policy_rule"] == terminal_result["routing"]["matched_rule"]
+        assert json.loads(audit_provenance[5])["checks"] == terminal_result["guardrails"]["checks"]
         stored_text = " ".join(str(value) for value in audit_row) + " " + str(
             connection.execute("SELECT context_json FROM ticket_runs WHERE run_id = ?", (run_id,)).fetchone()[0]
         )
@@ -264,6 +286,40 @@ def test_one_ticket_run_persists_label_audit_and_schema_valid_exports(
         assert "history-must-not-enter-runtime" not in stored_text
     finally:
         connection.close()
+
+
+def test_run_exports_one_failed_record_json_with_ticket_and_kpis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_decisions_api_mock(
+        monkeypatch,
+        lambda ticket_fields: ("deployment_failure", "medium"),
+    )
+    ticket = _supported_integration_ticket("T-FAILED-INTENT")
+    ticket["labels"] = {"intent": "billing_query"}
+    input_path = tmp_path / "labeled-ticket.json"
+    input_path.write_text(json.dumps([ticket]), encoding="utf-8")
+
+    _, output_directory, _ = run_ticket_batch(
+        input_path=input_path,
+        output_root=tmp_path / "outputs",
+        database_path=tmp_path / "runtime.sqlite3",
+        retriever=_ReadyRetriever(),
+        policy_path=TEST_ROUTING_POLICY_PATH,
+    )
+
+    failed_records = json.loads(
+        (output_directory / "failed_records.json").read_text(encoding="utf-8")
+    )
+    assert failed_records["failed_record_count"] == 1
+    assert failed_records["failed_records"] == [
+        {
+            "input_index": 0,
+            "ticket_id": "T-FAILED-INTENT",
+            "failed_kpis": ["intent"],
+        }
+    ]
 
 
 def test_stage_checkpoints_commit_before_the_next_batch_phase(
@@ -619,7 +675,8 @@ def test_empty_batch_writes_all_exports_with_explicit_zero_counts(
     )
 
     assert {path.name for path in output_directory.iterdir()} == {
-        "results.jsonl", "decision_log.jsonl", "metrics.json", "exceptions.jsonl",
+        "results.jsonl", "decision_log.jsonl", "metrics.json", "metrics.md",
+        "exceptions.jsonl", "failed_records.json",
     }
     assert _read_jsonl(output_directory / "results.jsonl") == []
     assert _read_jsonl(output_directory / "decision_log.jsonl") == []

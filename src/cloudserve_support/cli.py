@@ -23,10 +23,6 @@ from cloudserve_support.evaluation.quality_judge import (
     evaluate_quality_run,
 )
 from cloudserve_support.config import Settings
-from cloudserve_support.reporting.terminal_summary import (
-    build_terminal_summary,
-    format_terminal_summary,
-)
 from cloudserve_support.routing.policy_calibration import (
     calibrate_development_routing_policy,
     write_frozen_routing_policy,
@@ -198,48 +194,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     try:
-        run_id, output_directory, metrics = run_ticket_batch(
+        run_id, output_directory, _metrics = run_ticket_batch(
             input_path=parsed.input,
             output_root=parsed.output_root,
             database_path=parsed.database,
             policy_path=parsed.policy,
             label=parsed.label,
+            progress_callback=_print_run_progress,
         )
     except Exception as error:
         print(f"cloudserve: error: {error}", file=sys.stderr)
         return 1
-    print(f"Run ID: {run_id}")
-    print(f"Output directory: {output_directory}")
-    print(
-        "Batch export and finalization duration: "
-        f"{metrics['batch_export_duration_seconds']:.3f}s "
-        "(reported separately from per-ticket processing)."
-    )
-    print(json.dumps(metrics, ensure_ascii=False, sort_keys=True))
+    metrics_path = Path(output_directory) / "metrics.md"
     try:
-        input_records = json.loads(parsed.input.read_text(encoding="utf-8"))
-        results = _read_jsonl(Path(output_directory) / "results.jsonl")
-        summary = build_terminal_summary(
-            input_records=input_records if isinstance(input_records, list) else [],
-            results=results,
-            metrics=metrics,
-        )
-    except (OSError, json.JSONDecodeError, ValueError) as error:
-        print(f"cloudserve: could not build post-run terminal summary: {error}", file=sys.stderr)
+        metrics_output = metrics_path.read_text(encoding="utf-8").strip()
+    except OSError as error:
+        print(f"cloudserve: could not read metrics output: {error}", file=sys.stderr)
         return 1
-    print(format_terminal_summary(summary))
+    print(f"Run name: {parsed.label or run_id}")
+    print(f"Metrics: {metrics_path}")
+    print(metrics_output)
     return 0
 
 
-def _read_jsonl(path: Path) -> list[dict[str, object]]:
-    """Read persisted result rows for a post-run summary after processing ends."""
-    rows: list[dict[str, object]] = []
-    with path.open(encoding="utf-8") as file:
-        for line_number, line in enumerate(file, 1):
-            if not line.strip():
-                continue
-            value = json.loads(line)
-            if not isinstance(value, dict):
-                raise ValueError(f"{path}:{line_number}: expected a JSON object")
-            rows.append(value)
-    return rows
+def _print_run_progress(stage: str, status: str) -> None:
+    """Print one ticket-run stage transition so users can follow CLI progress."""
+    message = "in progress..." if status == "in_progress" else "done."
+    print(f"{stage} {message}", flush=True)
