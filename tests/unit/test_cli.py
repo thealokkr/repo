@@ -37,6 +37,14 @@ def test_run_prints_stage_progress_output_folder_and_metrics_table(
         progress_callback = kwargs["progress_callback"]
         progress_callback("Classification", "in_progress")
         progress_callback("Classification", "done")
+        progress_callback("Ticket processing", "in_progress")
+        progress_callback("Ticket 1/2 ('DEV-0001')", "ticket")
+        progress_callback("Checking ticket and source safety", "ticket_step")
+        progress_callback("", "ticket_separator")
+        progress_callback("Ticket 2/2 ('DEV-0002')", "ticket")
+        progress_callback("Generating draft", "ticket_step")
+        progress_callback("", "ticket_separator")
+        progress_callback("Ticket processing", "done")
         return "run-123", output_directory, {"internal_metric_dump": "hidden"}
 
     monkeypatch.setattr(cli, "run_ticket_batch", fake_run_ticket_batch)
@@ -56,6 +64,14 @@ def test_run_prints_stage_progress_output_folder_and_metrics_table(
     output = capsys.readouterr().out
     assert "Classification in progress..." in output
     assert "Classification done." in output
+    assert (
+        "Ticket processing in progress...\n"
+        "Ticket 1/2 ('DEV-0001'):\n"
+        "  - Checking ticket and source safety\n\n"
+        "Ticket 2/2 ('DEV-0002'):\n"
+        "  - Generating draft\n\n"
+        "Ticket processing done."
+    ) in output
     assert f"Output folder: {output_directory}" in output
     assert "Metrics (metrics.md):" in output
     assert metrics_content in output

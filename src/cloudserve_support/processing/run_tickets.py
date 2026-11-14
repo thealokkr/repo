@@ -280,7 +280,17 @@ def run_ticket_batch(
         _report_run_progress(progress_callback, "Routing", "done")
 
         _report_run_progress(progress_callback, "Ticket processing", "in_progress")
-        for prepared_ticket in prepared_tickets:
+
+        def report_ticket_step(step: str) -> None:
+            _report_run_progress(progress_callback, step, "ticket_step")
+
+        for ticket_position, prepared_ticket in enumerate(prepared_tickets, start=1):
+            ticket = prepared_ticket.ticket
+            _report_run_progress(
+                progress_callback,
+                f"Ticket {ticket_position}/{len(prepared_tickets)} ({ticket.ticket_id!r})",
+                "ticket",
+            )
             ticket_started = time.perf_counter()
             result, storage_ticket_id, ticket = _build_ticket_result(
                 prepared_ticket,
@@ -290,6 +300,14 @@ def run_ticket_batch(
                 policy_file_fingerprint=policy_file_fingerprint,
                 classifier_implementation_fingerprint=classifier_implementation_fingerprint,
                 generator=draft_generator,
+                ticket_step_callback=(
+                    report_ticket_step if progress_callback is not None else None
+                ),
+            )
+            _report_run_progress(
+                progress_callback,
+                "Persisting audit events and ticket status",
+                "ticket_step",
             )
             occurred_at = _utc_timestamp()
             connection.execute("BEGIN IMMEDIATE")
@@ -392,6 +410,8 @@ def run_ticket_batch(
                 result_payload=terminal_payload,
             )
             connection.commit()
+            _report_run_progress(progress_callback, "Ticket result persisted", "ticket_step")
+            _report_run_progress(progress_callback, "", "ticket_separator")
         _report_run_progress(progress_callback, "Ticket processing", "done")
 
         _report_run_progress(progress_callback, "Export finalization", "in_progress")
@@ -548,6 +568,7 @@ def _build_ticket_result(
     policy_file_fingerprint: str,
     classifier_implementation_fingerprint: str,
     generator: DraftGenerationProvider,
+    ticket_step_callback: Callable[[str], None] | None = None,
 ) -> tuple[dict[str, Any], str, CanonicalTicket]:
     """Compose one terminal outcome from its completed per-ticket pipeline phases."""
     ticket = prepared_ticket.ticket
@@ -580,6 +601,7 @@ def _build_ticket_result(
         generator=generator,
         issues=issues,
         duplicate_ticket_id=duplicate,
+        progress_callback=ticket_step_callback,
     )
     return result, storage_ticket_id, ticket
 

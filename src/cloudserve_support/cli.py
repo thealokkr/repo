@@ -221,6 +221,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _print_run_progress(stage: str, status: str) -> None:
-    """Print one ticket-run stage transition so users can follow CLI progress."""
-    message = "in progress..." if status == "in_progress" else "done."
-    print(f"{stage} {message}", flush=True)
+    """Print run-stage transitions and grouped per-ticket processing steps."""
+    if status == "ticket":
+        print(f"{stage}:", flush=True)
+    elif status == "ticket_step":
+        print(f"  - {stage}", flush=True)
+    elif status == "ticket_separator":
+        print(flush=True)
+    else:
+        message = "in progress..." if status == "in_progress" else "done."
+        print(f"{stage} {message}", flush=True)

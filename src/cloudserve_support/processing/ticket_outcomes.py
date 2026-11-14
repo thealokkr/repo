@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from typing import Any
 
 from cloudserve_support.classification.ticket_classification import TicketClassification
@@ -48,8 +49,10 @@ def build_ticket_outcome(
     generator: DraftGenerationProvider,
     issues: list[str],
     duplicate_ticket_id: bool,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Return the final structured draft, complete handoff, or safe degradation."""
+    _report_ticket_step(progress_callback, "Checking ticket and source safety")
     classification_payload = classification.as_dict()
     retrieval_payload = retrieval.as_dict()
     current_sources, eligibility_evidence = eligible_source_subset(retrieval.sources)
@@ -199,21 +202,39 @@ def build_ticket_outcome(
     }
     draft: dict[str, Any] | None = None
     draft_generation_request_duration_seconds = 0.0
+    _report_ticket_step(progress_callback, "Checking draft eligibility")
     if route == "draft_for_review" and error is None:
         if injection_detected:
+            _report_ticket_step(
+                progress_callback,
+                "Draft withheld by the prompt-injection guardrail",
+            )
             route = "escalate"
             reason = "Ticket contains an instruction override attempt and was held for human review."
         elif private_input_detected:
+            _report_ticket_step(
+                progress_callback,
+                "Draft withheld by the private-data input guardrail",
+            )
             route = "escalate"
             reason = "Ticket context contains private data that must be reviewed by an agent."
         elif private_source_count:
+            _report_ticket_step(
+                progress_callback,
+                "Draft withheld because a source contains private data",
+            )
             route = "escalate"
             reason = "Retrieved source content contains private data and was withheld for human review."
         elif not eligible_sources:
+            _report_ticket_step(
+                progress_callback,
+                "Draft withheld because no source passed eligibility checks",
+            )
             route = "escalate"
             reason = "No source passed the eligibility guardrail for drafting."
         else:
             try:
+                _report_ticket_step(progress_callback, "Generating draft")
                 raw_generated = generator.generate_claims(
                     ticket,
                     sources=eligible_sources,
@@ -222,9 +243,11 @@ def build_ticket_outcome(
                 draft_generation_request_duration_seconds = (
                     _read_generation_request_duration(generator)
                 )
-                generated = parse_generated_claims(
-                    raw_generated
+                _report_ticket_step(
+                    progress_callback,
+                    "Validating draft structure, citations, and privacy",
                 )
+                generated = parse_generated_claims(raw_generated)
                 generation["status"] = "generated"
                 generated_text = " ".join(item["text"] for item in generated["claims"])
                 private_output_detected = contains_private_data(generated_text)
@@ -299,6 +322,10 @@ def build_ticket_outcome(
                 }
                 route = "degrade"
                 reason = "Draft generation failed; the ticket is available for human review."
+                _report_ticket_step(
+                    progress_callback,
+                    "Draft generation or validation failed; degrading ticket",
+                )
                 guardrail_checks.extend(
                     _make_failed_draft_checks(str(generation_error))
                 )
@@ -314,11 +341,20 @@ def build_ticket_outcome(
                 }
                 route = "degrade"
                 reason = "Draft generation failed; the ticket is available for human review."
+                _report_ticket_step(
+                    progress_callback,
+                    "Draft generation or validation failed; degrading ticket",
+                )
                 guardrail_checks.extend(
                     _make_failed_draft_checks(
                         f"Provider failure type: {type(unexpected_generation_error).__name__}."
                     )
                 )
+    else:
+        _report_ticket_step(
+            progress_callback,
+            f"Draft generation skipped (route: {route})",
+        )
 
     if not any(check["check"] == "output_structure" for check in guardrail_checks):
         guardrail_checks.extend(
@@ -372,8 +408,9 @@ def build_ticket_outcome(
             routing_fields["matched_rule"] = "generation_guardrail_blocked"
         routing_fields["evidence_ready"] = bool(eligible_sources)
 
-    handoff = (
-        _build_human_handoff(
+    if route in {"escalate", "degrade"}:
+        _report_ticket_step(progress_callback, "Building and sanitizing human handoff")
+        handoff = _build_human_handoff(
             ticket,
             classification=classification_payload,
             retrieval=retrieval_payload,
@@ -387,9 +424,8 @@ def build_ticket_outcome(
                 draft_was_withheld=generation["status"] == "generated" and draft is None,
             ),
         )
-        if route in {"escalate", "degrade"}
-        else None
-    )
+    else:
+        handoff = None
     handoff_private_data_withheld = False
     handoff_instruction_text_withheld = False
     if handoff is not None:
@@ -419,6 +455,7 @@ def build_ticket_outcome(
                         "action": "block_and_escalate",
                     }
                 )
+    _report_ticket_step(progress_callback, "Finalizing ticket outcome")
     result = {
         "run_id": run_id,
         "input_index": input_index,
@@ -442,6 +479,15 @@ def build_ticket_outcome(
     if error:
         result["error"] = error
     return result
+
+
+def _report_ticket_step(
+    progress_callback: Callable[[str], None] | None,
+    step: str,
+) -> None:
+    """Report one ticket-processing step when the CLI requested detailed progress."""
+    if progress_callback is not None:
+        progress_callback(step)
 
 
 def _read_generation_request_duration(generator: DraftGenerationProvider) -> float:
