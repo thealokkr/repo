@@ -33,7 +33,7 @@ DEFAULT_INDEX_PATH = REPO_ROOT / "data" / "index"
 COLLECTION_NAME = "cloudserve_kb"
 EMBEDDING_DIMENSIONS = 768
 MINIMUM_SIMILARITY = 0.45
-MAXIMUM_SOURCES = 3
+MAXIMUM_SOURCES = 5
 QUERY_EMBEDDING_TIMEOUT_SECONDS = 15.0
 QUERY_EMBEDDING_MAX_RETRIES = 0
 # Initial measured five-ticket settings; the downstream 5/50 CLI acceptance verifies them.
@@ -45,6 +45,7 @@ REQUIRED_PASSAGE_METADATA = (
     "category",
     "applies_to",
     "section",
+    "related_docs",
     "content_sha256",
     "approval_status",
     "approval_status_source",
@@ -70,6 +71,7 @@ class RetrievalResult:
     embedding_model: str
     source_sha256: str | None
     metadata_manifest_sha256: str | None
+    related_sources: tuple[dict[str, Any], ...] = ()
 
     @property
     def evidence_ready(self) -> bool:
@@ -112,6 +114,7 @@ class KnowledgeRetriever:
         self.source_sha256: str | None = None
         self.metadata_manifest_sha256: str | None = None
         self.expected_passages: dict[str, dict[str, Any]] = {}
+        self.article_records_by_doc_id: dict[str, dict[str, Any]] = {}
         self.article_metadata: dict[str, dict[str, Any]] = {}
         self.review_interval_days = 0
         self.unavailable_reason: tuple[str, str] | None = None
@@ -167,6 +170,9 @@ class KnowledgeRetriever:
             review_interval_days=self.review_interval_days,
         )
         self.expected_passages = {record["id"]: record for record in expected_records}
+        self.article_records_by_doc_id = {
+            record["metadata"]["doc_id"]: record for record in expected_records
+        }
         expected_passage_records_hash = passage_records_sha256(expected_records)
 
         index_manifest = json.loads((index_path / "manifest.json").read_text(encoding="utf-8"))
@@ -176,6 +182,7 @@ class KnowledgeRetriever:
             or index_manifest.get("source_path") != "data/kb/documentation.json"
             or index_manifest.get("source_sha256") != self.source_sha256
             or index_manifest.get("metadata_manifest_path") != "data/kb/metadata_manifest.json"
+            or index_manifest.get("metadata_manifest_sha256") != self.metadata_manifest_sha256
             or not isinstance(index_manifest.get("metadata_manifest_sha256"), str)
             or len(index_manifest["metadata_manifest_sha256"]) != 64
             or any(
@@ -222,7 +229,7 @@ class KnowledgeRetriever:
             raise ValueError("Chroma passage records do not match the current source corpus.")
 
     def retrieve(self, ticket: CanonicalTicket) -> RetrievalResult:
-        """Return up to three ranked sources or an explicit safe no-evidence result."""
+        """Return up to five ranked articles or an explicit safe no-evidence result."""
         if self.unavailable_reason:
             return self._empty_result("unavailable", *self.unavailable_reason)
 
@@ -419,14 +426,17 @@ class KnowledgeRetriever:
             )
 
         excluded = Counter()
+        excluded_article_ids: set[str] = set()
         current_eligible_count = 0
-        eligible: list[tuple[float, dict[str, Any]]] = []
+        eligible: list[tuple[float, dict[str, Any], dict[str, Any]]] = []
         for passage_id, document, metadata, distance in zip(
             ids, documents, metadatas, distances, strict=True
         ):
             reason = self._source_exclusion_reason(passage_id, document, metadata)
             if reason:
                 excluded[reason] += 1
+                if isinstance(passage_id, str):
+                    excluded_article_ids.add(passage_id)
                 continue
             current_eligible_count += 1
             if (
@@ -441,16 +451,23 @@ class KnowledgeRetriever:
                 excluded["below_relevance_threshold"] += 1
                 continue
             record = self.expected_passages[passage_id]
-            eligible.append((similarity, self._source_snapshot(passage_id, record, similarity)))
+            eligible.append((similarity, self._source_snapshot(passage_id, record, similarity), record))
 
         eligible.sort(key=lambda item: (-item[0], item[1]["passage_id"]))
-        snapshots = tuple(source for _, source in eligible[:MAXIMUM_SOURCES])
+        primary_hits = eligible[:MAXIMUM_SOURCES]
+        snapshots = tuple(source for _, source, _ in primary_hits)
         if snapshots:
+            related_sources = self._related_source_snapshots(
+                primary_hits,
+                excluded,
+                excluded_article_ids,
+            )
             return RetrievalResult(
                 status="ready",
                 reason_code="relevant_sources_found",
-                reason="Current capstone-approved passages met the relevance threshold.",
+                reason="Current capstone-approved articles met the relevance threshold.",
                 sources=snapshots,
+                related_sources=related_sources,
                 eligible_candidate_count=current_eligible_count,
                 excluded_candidate_counts=dict(sorted(excluded.items())),
                 minimum_similarity=MINIMUM_SIMILARITY,
@@ -524,9 +541,9 @@ class KnowledgeRetriever:
         self,
         passage_id: str,
         record: dict[str, Any],
-        similarity: float,
+        similarity: float | None,
     ) -> dict[str, Any]:
-        """Build citation and audit fields from the source-resolved passage record."""
+        """Build source snapshots; related articles intentionally have no vector score."""
         metadata = record["metadata"]
         return {
             "passage_id": passage_id,
@@ -537,7 +554,7 @@ class KnowledgeRetriever:
             "category": metadata["category"],
             "applies_to": metadata["applies_to"],
             "similarity": similarity,
-            "minimum_similarity": MINIMUM_SIMILARITY,
+            "minimum_similarity": MINIMUM_SIMILARITY if similarity is not None else None,
             "approval_status": metadata["approval_status"],
             "approval_status_source": metadata["approval_status_source"],
             "metadata_owner": metadata["metadata_owner"],
@@ -546,9 +563,42 @@ class KnowledgeRetriever:
             "reviewed_at": metadata["reviewed_at"],
             "review_interval_days": metadata["review_interval_days"],
             "content_sha256": metadata["content_sha256"],
+            "related_docs": json.loads(metadata["related_docs"]),
             "source_ref": f"data/kb/documentation.json#{metadata['doc_id']}#{metadata['section']}",
             "metadata_manifest_sha256": self.metadata_manifest_sha256,
         }
+
+    def _related_source_snapshots(
+        self,
+        primary_hits: list[tuple[float, dict[str, Any], dict[str, Any]]],
+        excluded: Counter[str],
+        excluded_article_ids: set[str],
+    ) -> tuple[dict[str, Any], ...]:
+        """Resolve approved fresh related articles from the source-validated corpus."""
+        primary_doc_ids = {source["doc_id"] for _, source, _ in primary_hits}
+        seen_doc_ids = set(primary_doc_ids)
+        related_sources: list[dict[str, Any]] = []
+        for _, _, primary_record in primary_hits:
+            related_doc_ids = json.loads(primary_record["metadata"]["related_docs"])
+            for related_doc_id in related_doc_ids:
+                if related_doc_id in seen_doc_ids:
+                    continue
+                seen_doc_ids.add(related_doc_id)
+                related_record = self.article_records_by_doc_id[related_doc_id]
+                reason = self._source_exclusion_reason(
+                    related_record["id"],
+                    related_record["document"],
+                    related_record["metadata"],
+                )
+                if reason:
+                    if related_record["id"] not in excluded_article_ids:
+                        excluded[reason] += 1
+                        excluded_article_ids.add(related_record["id"])
+                    continue
+                related_sources.append(
+                    self._source_snapshot(related_record["id"], related_record, None)
+                )
+        return tuple(related_sources)
 
     def _empty_result(
         self,

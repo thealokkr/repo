@@ -1,4 +1,4 @@
-"""Load the packaged KB and its capstone-owned eligibility metadata."""
+"""Load whole KB articles and build canonical source records."""
 
 from __future__ import annotations
 
@@ -10,8 +10,7 @@ from pathlib import Path
 from typing import Any
 
 
-CHUNKER_VERSION = "markdown-h2-v1"
-SECTION_PATTERN = re.compile(r"(?m)^##\s+(.+?)\s*$")
+CHUNKER_VERSION = "whole-article-v1"
 ARTICLE_VERSION_PATTERN = re.compile(r"^[a-z][a-z0-9]*-\d+\.\d+$")
 APPROVAL_STATUSES = {"approved", "expired", "draft", "unapproved", "unknown"}
 REQUIRED_METADATA_FIELDS = {
@@ -143,23 +142,23 @@ def validate_kb_metadata_coverage(
         raise ValueError("KB metadata coverage mismatch: " + "; ".join(details) + ".")
 
 
-def split_article_passages(article: dict[str, Any]) -> list[tuple[str, str]]:
-    """Split one Markdown article at level-two headings, keeping sections intact."""
-    content = article["content"].strip()
-    matches = list(SECTION_PATTERN.finditer(content))
-    if not matches:
-        return [("Article", content)]
-
-    passages: list[tuple[str, str]] = []
-    for index, match in enumerate(matches):
-        body_start = match.end()
-        body_end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
-        passage_text = content[body_start:body_end].strip()
-        if passage_text:
-            passages.append((match.group(1).strip(), passage_text))
-    if not passages:
-        raise ValueError(f"KB article {article['doc_id']} contains no usable passage text.")
-    return passages
+def _related_doc_ids(article: dict[str, Any], article_ids: set[str]) -> list[str]:
+    """Validate related article references against the packaged corpus."""
+    related_docs = article.get("related_docs", [])
+    if not isinstance(related_docs, list) or any(
+        not isinstance(doc_id, str) or not doc_id.strip() for doc_id in related_docs
+    ):
+        raise ValueError(f"KB article {article['doc_id']} related_docs must be a string array.")
+    if len(related_docs) != len(set(related_docs)):
+        raise ValueError(f"KB article {article['doc_id']} has duplicate related_docs.")
+    unknown_ids = sorted(set(related_docs) - article_ids)
+    if unknown_ids:
+        raise ValueError(
+            f"KB article {article['doc_id']} references unknown related docs: "
+            + ", ".join(unknown_ids)
+            + "."
+        )
+    return related_docs
 
 
 def build_passage_records(
@@ -170,49 +169,48 @@ def build_passage_records(
     metadata_source: str,
     review_interval_days: int,
 ) -> list[dict[str, Any]]:
-    """Build stable passage records with project-owned citation and eligibility metadata."""
+    """Build one canonical full-article record per article with scalar metadata."""
     validate_kb_metadata_coverage(articles, metadata_by_id)
+    article_ids = {article["doc_id"] for article in articles}
     records: list[dict[str, Any]] = []
     for article in articles:
+        related_docs = _related_doc_ids(article, article_ids)
         article_hash = hashlib.sha256(article["content"].encode("utf-8")).hexdigest()
         article_metadata = metadata_by_id[article["doc_id"]]
-        section_passages = split_article_passages(article)
-        for chunk_index, (section, passage_text) in enumerate(section_passages):
-            document = (
-                f"Title: {article['title']}\n"
-                f"Applies to: {article['applies_to']}\n"
-                f"Section: {section}\n\n"
-                f"{passage_text}"
-            )
-            record_metadata: dict[str, str | int] = {
-                "doc_id": article["doc_id"],
-                "title": article["title"],
-                "category": article["category"],
-                "applies_to": article["applies_to"],
-                "section": section,
-                "chunk_index": chunk_index,
-                "chunk_count": len(section_passages),
-                "content_sha256": article_hash,
-                "approval_status": article_metadata["approval_status"],
-                "approval_status_source": metadata_source,
-                "metadata_owner": metadata_owner,
-                "metadata_source": metadata_source,
-                "article_version": article_metadata["article_version"],
-                "reviewed_at": article_metadata["reviewed_at"],
-                "review_interval_days": review_interval_days,
+        document = (
+            f"Title: {article['title']}\n"
+            f"Category: {article['category']}\n"
+            f"Applies to: {article['applies_to']}\n\n"
+            f"{article['content']}"
+        )
+        record_metadata: dict[str, str | int] = {
+            "doc_id": article["doc_id"],
+            "title": article["title"],
+            "category": article["category"],
+            "applies_to": article["applies_to"],
+            "section": "Article",
+            "related_docs": json.dumps(related_docs, separators=(",", ":")),
+            "content_sha256": article_hash,
+            "approval_status": article_metadata["approval_status"],
+            "approval_status_source": metadata_source,
+            "metadata_owner": metadata_owner,
+            "metadata_source": metadata_source,
+            "article_version": article_metadata["article_version"],
+            "reviewed_at": article_metadata["reviewed_at"],
+            "review_interval_days": review_interval_days,
+        }
+        records.append(
+            {
+                "id": f"{article['doc_id']}:{article_hash}",
+                "document": document,
+                "metadata": record_metadata,
             }
-            records.append(
-                {
-                    "id": f"{article['doc_id']}:{article_hash[:12]}:{chunk_index}",
-                    "document": document,
-                    "metadata": record_metadata,
-                }
-            )
+        )
     return records
 
 
 def passage_records_sha256(records: list[dict[str, Any]]) -> str:
-    """Hash the canonical source-derived IDs, passage text, and metadata for an index."""
+    """Hash the canonical source-derived IDs, article text, and metadata for an index."""
     canonical_records = [
         {
             "id": record["id"],

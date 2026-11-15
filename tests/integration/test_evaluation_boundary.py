@@ -89,9 +89,19 @@ def test_labels_and_history_change_only_post_run_evaluation(
     changed_result.pop("draft_generation_request_duration_seconds")
     first_result.pop("processing_latency_seconds")
     changed_result.pop("processing_latency_seconds")
+    for result in (first_result, changed_result):
+        for field in (
+            "expected_intent",
+            "expected_urgency",
+            "expected_route",
+            "expected_answerable_from_docs",
+            "expected_doc_ids",
+            "expected_must_not_auto_respond",
+        ):
+            result.pop(field)
 
     assert changed_result == first_result
-    assert first_result["route"] == "escalate"
+    assert first_result["predicted_route"] == "escalate"
     first_metrics = json.loads((first_output / "metrics.json").read_text(encoding="utf-8"))
     changed_metrics = json.loads((changed_output / "metrics.json").read_text(encoding="utf-8"))
     assert first_metrics["evaluation"]["run_observed"]["technical"]["route_accuracy"]["value"] == 1
@@ -99,13 +109,11 @@ def test_labels_and_history_change_only_post_run_evaluation(
     assert first_metrics["evaluation"]["historical_baseline"]["overall"]["csat_mean"]["value"] == 2
     assert changed_metrics["evaluation"]["historical_baseline"]["overall"]["csat_mean"]["value"] == 5
     for output in (first_output, changed_output):
-        persisted_text = (
-            (output / "results.jsonl").read_text(encoding="utf-8")
-            + (output / "decision_log.jsonl").read_text(encoding="utf-8")
-        )
-        assert '"labels"' not in persisted_text
-        assert '"history"' not in persisted_text
-        assert "billing" not in persisted_text
+        result_text = (output / "results.jsonl").read_text(encoding="utf-8")
+        decision_text = (output / "decision_log.jsonl").read_text(encoding="utf-8")
+        assert '"labels"' not in result_text + decision_text
+        assert '"history"' not in result_text + decision_text
+        assert "billing" not in decision_text
 
     with sqlite3.connect(database_path) as connection:
         persisted_rows = connection.execute(

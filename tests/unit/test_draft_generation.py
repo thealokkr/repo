@@ -13,6 +13,7 @@ from cloudserve_support.config import Settings
 from cloudserve_support.domain.ticket import CanonicalTicket
 from cloudserve_support.errors import ConfigurationError
 from cloudserve_support.generation.draft_generation import (
+    GENERATION_SYSTEM_INSTRUCTION,
     GEMINI_DRAFT_RESPONSE_SCHEMA,
     DraftGenerationError,
     GeminiDraftGenerationProvider,
@@ -134,6 +135,7 @@ def test_gemini_generation_uses_configured_model_and_strict_json_schema(monkeypa
     assert calls["model"] == "gemini-3.8-flash"
     assert provider.last_request_duration_seconds >= 0.015
     config = calls["config"]
+    assert config.system_instruction == GENERATION_SYSTEM_INSTRUCTION
     assert config.response_mime_type == "application/json"
     assert config.response_schema == GEMINI_DRAFT_RESPONSE_SCHEMA
     schema = config.response_schema
@@ -146,6 +148,13 @@ def test_gemini_generation_uses_configured_model_and_strict_json_schema(monkeypa
     provider_input = calls["contents"]
     assert "LABEL_SECRET" not in provider_input
     assert "HISTORY_SECRET" not in provider_input
+
+
+def test_generator_prompt_uses_retrieved_passages_as_closed_world_sources() -> None:
+    assert "only the supplied eligible retrieved source passages" in GENERATION_SYSTEM_INSTRUCTION
+    assert "do not use model memory, pretraining, general knowledge" in GENERATION_SYSTEM_INSTRUCTION
+    assert "Use the ticket only to understand the customer's question" in GENERATION_SYSTEM_INSTRUCTION
+    assert "Every factual claim must be a verbatim contiguous excerpt" in GENERATION_SYSTEM_INSTRUCTION
 
 
 @pytest.mark.parametrize(
