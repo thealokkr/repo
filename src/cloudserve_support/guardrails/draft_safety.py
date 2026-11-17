@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
 from typing import Any
 
@@ -27,104 +28,18 @@ _PRIVATE_DATA_PATTERNS = (
     re.compile(r"\bBearer\s+[A-Za-z0-9._~+/-]{12,}", re.I),
 )
 _EVALUATION_KEYS = frozenset({"labels", "history"})
-CLARIFICATION_QUESTION_TEMPLATES = {
-    "error_details": "What exact error message or code do you see?",
-    "steps_tried": "What steps reproduce the issue?",
-    "expected_observed": "What result did you expect, and what result did you observe?",
-    "environment_version": "Which application version and environment are involved?",
-    "occurrence_time": "When did the issue first occur?",
-    "request_identifier": "If available, what request or trace ID is shown?",
-    "none": "",
-}
-CLARIFICATION_KINDS = tuple(CLARIFICATION_QUESTION_TEMPLATES)
-
-
-def clarification_question_for_ticket(kind: str, ticket_text: str) -> str:
-    """Render only a fixed missing-detail question; never emit provider question text."""
-    if kind not in CLARIFICATION_QUESTION_TEMPLATES or kind == "none":
-        return ""
-    if _clarification_detail_is_present(kind, ticket_text):
-        return ""
-    return CLARIFICATION_QUESTION_TEMPLATES[kind]
-
-
-def default_clarification_kind(ticket_text: str) -> str:
-    """Choose a deterministic missing diagnostic question for offline drafting."""
-    text = ticket_text.casefold()
-    if not re.search(
-        r"\b(?:error|fail(?:ed|ure)?|unable|cannot|can't|not working|issue|problem)\b",
-        text,
-    ):
-        return "none"
-    for kind in ("error_details", "steps_tried"):
-        if not _clarification_detail_is_present(kind, text):
-            return kind
-    return "none"
-
-
-def _clarification_detail_is_present(kind: str, ticket_text: str) -> bool:
-    """Detect common ticket evidence that already answers a requested detail type."""
-    text = ticket_text.casefold()
-    if kind == "error_details":
-        return bool(
-            re.search(r"\b(?:http\s*)?[45]\d\d\b", text)
-            or re.search(r"\b(?:err|e)[_-][a-z0-9_-]{2,}\b", text)
-            or re.search(
-                r"\b(?:error(?:\s+message|\s+code)?|status\s+code|message)\s*(?:is|was|:|=)\s*['\"]?\w+",
-                text,
-            )
-        )
-    if kind == "steps_tried":
-        return bool(
-            re.search(
-                r"\b(?:i|we)\s+(?:already\s+)?"
-                r"(?:tried|attempted|restarted|retried|ran|cleared|refreshed)\b",
-                text,
-            )
-            or re.search(r"\bfirst\b.{0,120}\bthen\b", text)
-            or re.search(r"(?:^|\s)\d+[.)]\s+\S", text)
-        )
-    if kind == "expected_observed":
-        has_expected = re.search(
-            r"\b(?:expected|should|normally|used to|previously)\b", text
-        )
-        has_observed = re.search(
-            r"\b(?:now|instead|actual(?:ly)?|received|got|returned|shows?|fails?|failed)\b",
-            text,
-        )
-        return bool(has_expected and has_observed)
-    if kind == "environment_version":
-        return bool(
-            re.search(
-                r"\b(?:version|build|release)\s*[:#]?\s*v?\d+(?:\.\d+)+\b",
-                text,
-            )
-            or re.search(
-                r"\b(?:chrome|firefox|safari|edge|windows|macos|ios|android|linux)"
-                r"\s+\d+(?:\.\d+)*\b",
-                text,
-            )
-        )
-    if kind == "occurrence_time":
-        return bool(
-            re.search(
-                r"\b(?:today|yesterday|this morning|last night|last week|last month|"
-                r"\d+\s+(?:minutes?|hours?|days?|weeks?)\s+ago)\b",
-                text,
-            )
-            or re.search(
-                r"\b\d{4}-\d{2}-\d{2}(?:[t ]\d{2}:\d{2})?\b", text
-            )
-        )
-    if kind == "request_identifier":
-        return bool(
-            re.search(
-                r"\b(?:request|trace|correlation)[ -]?(?:id|identifier)\s*"
-                r"(?:is\s*)?[:=#]?\s*[a-z0-9][a-z0-9._-]{5,}\b",
-                text,
-            )
-        )
-    return False
+_TOKEN_PATTERN = re.compile(r"[a-z0-9]{3,}")
+_CLAIM_STOPWORDS = frozenset(
+    {
+        "the", "and", "for", "with", "that", "this", "from", "your", "you",
+        "are", "was", "were", "can", "will", "not", "but", "have", "has",
+        "had", "into", "onto", "about", "after", "before", "when", "where",
+        "which", "who", "what", "how", "all", "any", "each", "only", "also",
+        "more", "most", "other", "such", "than", "then", "them", "they",
+        "their", "there", "these", "those", "its", "our", "may", "might",
+        "could", "should", "would", "use", "using", "used",
+    }
+)
 
 
 def eligible_source_subset(
@@ -259,27 +174,419 @@ def sanitize_handoff_content(value: object) -> tuple[object, bool, bool]:
     return value, False, False
 
 
+def inspect_claim_grounding(
+    claims: list[dict[str, Any]],
+    sources: tuple[dict[str, Any], ...],
+    *,
+    verified_claims: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Evaluate all claims and return per-claim grounding failures without mutating state."""
+    sources_by_id = {
+        source["passage_id"]: source
+        for source in sources
+        if isinstance(source.get("passage_id"), str)
+    }
+    if not claims:
+        return {
+            "grounded": False,
+            "failure_reason": "No source-grounded claims were returned.",
+            "failed_claims": [],
+            "minimum_ratio": 0.65,
+        }
+    verified_by_id = (
+        _index_verified_claims_by_passage_id(sources, verified_claims)
+        if verified_claims is not None
+        else None
+    )
+    failed_claims: list[dict[str, Any]] = []
+    for claim_position, claim in enumerate(claims, start=1):
+        failure = _inspect_claim_grounding(
+            claim,
+            claim_position=claim_position,
+            sources_by_id=sources_by_id,
+            verified_by_id=verified_by_id,
+        )
+        if failure is not None:
+            failed_claims.append(failure)
+    return {
+        "grounded": not failed_claims,
+        "failure_reason": failed_claims[0]["failure_reason"] if failed_claims else None,
+        "failed_claims": failed_claims,
+        "minimum_ratio": 0.65,
+    }
+
+
 def check_claim_grounding(
     claims: list[dict[str, Any]],
     sources: tuple[dict[str, Any], ...],
+    *,
+    verified_claims: Sequence[Mapping[str, Any]] | None = None,
 ) -> tuple[bool, str]:
-    """Require every output claim to be an exact excerpt from a cited source."""
-    sources_by_id = {source["passage_id"]: source for source in sources}
+    """Require every output claim to cite safe same-ticket sources and stay grounded."""
+    sources_by_id = {
+        source["passage_id"]: source
+        for source in sources
+        if isinstance(source.get("passage_id"), str)
+    }
     if not claims:
         return False, "No source-grounded claims were returned."
-    for claim in claims:
-        source_ids = set(claim["source_ids"])
-        if not source_ids or not source_ids.issubset(sources_by_id):
-            return False, "A claim cited a passage outside the retrieved eligible source set."
-        normalized_claim = _normalize_excerpt(claim["text"])
-        if re.search(r"\[citation:[^\]]+\]", claim["text"], re.I):
-            return False, "A claim contained an untrusted citation marker."
-        if not all(
-            normalized_claim in _normalize_excerpt(sources_by_id[source_id]["passage_text"])
-            for source_id in source_ids
-        ):
-            return False, "A claim was not copied from every one of its cited source passages."
-    return True, "Every claim is an exact excerpt with resolvable eligible passage citations."
+    verified_by_id = (
+        _index_verified_claims_by_passage_id(sources, verified_claims)
+        if verified_claims is not None
+        else None
+    )
+    for claim_position, claim in enumerate(claims, start=1):
+        failure = _inspect_claim_grounding(
+            claim,
+            claim_position=claim_position,
+            sources_by_id=sources_by_id,
+            verified_by_id=verified_by_id,
+        )
+        if failure is not None:
+            return False, failure["failure_reason"]
+    return True, "Every claim is grounded in policy-verified claims and resolvable eligible sources."
+
+
+def _index_verified_claims_by_passage_id(
+    sources: tuple[dict[str, Any], ...],
+    verified_claims: Sequence[Mapping[str, Any]],
+) -> dict[str, list[str]]:
+    """Map each safe source passage_id to policy-verified claim texts for that article."""
+    by_passage_id: dict[str, list[str]] = {
+        source["passage_id"]: []
+        for source in sources
+        if isinstance(source.get("passage_id"), str)
+    }
+    valid_claims = [
+        (
+            verified["text"].strip(),
+            {sid for sid in verified["source_ids"] if isinstance(sid, str)},
+        )
+        for verified in verified_claims
+        if isinstance(verified.get("text"), str)
+        and verified["text"].strip()
+        and isinstance(verified.get("source_ids"), list)
+    ]
+    for source in sources:
+        passage_id = source.get("passage_id")
+        doc_id = source.get("doc_id")
+        if not isinstance(passage_id, str):
+            continue
+        by_passage_id[passage_id] = [
+            text
+            for text, id_set in valid_claims
+            if passage_id in id_set or doc_id in id_set
+        ]
+    return by_passage_id
+
+
+def _inspect_claim_grounding(
+    claim: Mapping[str, Any],
+    *,
+    claim_position: int,
+    sources_by_id: dict[str, dict[str, Any]],
+    verified_by_id: dict[str, list[str]] | None,
+) -> dict[str, Any] | None:
+    """Return structured failure details for one claim, or None when it passes."""
+    claim_text = claim.get("text")
+    display_claim = claim_text if isinstance(claim_text, str) else ""
+    raw_source_ids = claim.get("source_ids")
+    display_source_ids = (
+        [sid for sid in raw_source_ids if isinstance(sid, str)]
+        if isinstance(raw_source_ids, list)
+        else []
+    )
+
+    def _failure(
+        failure_reason: str,
+        *,
+        failed_clauses: list[str] | None = None,
+        minimum_ratio: float | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "claim_position": claim_position,
+            "claim": display_claim,
+            "source_ids": display_source_ids,
+            "failed_clauses": failed_clauses or [],
+            "failure_reason": failure_reason,
+            "minimum_ratio": minimum_ratio,
+        }
+
+    if not isinstance(claim_text, str) or not claim_text.strip():
+        return _failure("A claim was empty or malformed.")
+    if re.search(r"\[citation:[^\]]+\]", claim_text, re.I):
+        return _failure("A claim contained an untrusted citation marker.")
+    if not isinstance(raw_source_ids, list) or not raw_source_ids or not all(
+        isinstance(sid, str) for sid in raw_source_ids
+    ):
+        return _failure("A claim is missing valid source_ids.")
+    ordered_source_ids = list(dict.fromkeys(raw_source_ids))
+    source_ids = set(ordered_source_ids)
+    if not source_ids.issubset(sources_by_id):
+        return _failure("A claim cited a passage outside the retrieved eligible source set.")
+    if "citations" in claim and not _citations_match_sources(
+        claim["citations"],
+        source_ids=source_ids,
+        sources_by_id=sources_by_id,
+    ):
+        return _failure("A claim had unresolved or mismatched structured citations.")
+
+    source_failed_clauses = _failed_text_support_clauses(
+        claim_text,
+        source_ids=ordered_source_ids,
+        sources_by_id=sources_by_id,
+        min_ratio=0.65,
+    )
+    if source_failed_clauses is not None:
+        return _failure(
+            "A claim was not supported by every one of its cited source articles.",
+            failed_clauses=source_failed_clauses,
+            minimum_ratio=0.65,
+        )
+
+    if verified_by_id is not None:
+        verified_failed_clauses, verified_ratio = _failed_verified_claim_clauses(
+            claim_text,
+            source_ids=ordered_source_ids,
+            sources_by_id=sources_by_id,
+            verified_by_id=verified_by_id,
+        )
+        if verified_failed_clauses is not None:
+            return _failure(
+                "A claim was not grounded in the policy-verified claims for its cited articles.",
+                failed_clauses=verified_failed_clauses,
+                minimum_ratio=verified_ratio,
+            )
+    return None
+
+
+def _failed_text_support_clauses(
+    claim_text: str,
+    *,
+    source_ids: Sequence[str],
+    sources_by_id: dict[str, dict[str, Any]],
+    min_ratio: float,
+) -> list[str] | None:
+    """Return failing claim clauses against cited passages, or None when all pass."""
+    segments = _claim_segments(claim_text, split_clauses=True)
+    if not segments:
+        return [claim_text.strip()] if claim_text.strip() else []
+    failed: list[str] = []
+    seen: set[str] = set()
+    for sid in source_ids:
+        reference_text = str(sources_by_id[sid].get("passage_text", ""))
+        for segment in segments:
+            if not _segment_supports_claim(
+                segment,
+                reference_text,
+                min_ratio=min_ratio,
+                use_overlap_coefficient=False,
+            ) and segment not in seen:
+                seen.add(segment)
+                failed.append(segment)
+    return failed if failed else None
+
+
+def _failed_verified_claim_clauses(
+    claim_text: str,
+    *,
+    source_ids: Sequence[str],
+    sources_by_id: dict[str, dict[str, Any]],
+    verified_by_id: dict[str, list[str]],
+) -> tuple[list[str] | None, float]:
+    """Return failing claim clauses against policy-verified claims, or None when all pass."""
+    source_id_set = set(source_ids)
+    is_verbatim_excerpt = _clause_is_verbatim_in_sources(
+        claim_text,
+        source_ids=source_id_set,
+        sources_by_id=sources_by_id,
+    )
+    min_ratio = 0.25 if is_verbatim_excerpt else 0.65
+    clauses = _claim_segments(claim_text, split_clauses=not is_verbatim_excerpt)
+    combined_verified: list[str] = []
+    for sid in source_ids:
+        entries = verified_by_id.get(sid, [])
+        if not entries:
+            return (clauses or [claim_text.strip()]), min_ratio
+        combined_verified.extend(entries)
+    if not clauses:
+        return ([claim_text.strip()] if claim_text.strip() else []), min_ratio
+    verified_text = " ".join(combined_verified)
+    failed = [
+        clause
+        for clause in clauses
+        if not _segment_supports_claim(
+            clause,
+            verified_text,
+            min_ratio=min_ratio,
+            use_overlap_coefficient=is_verbatim_excerpt,
+        )
+    ]
+    return (failed if failed else None), min_ratio
+
+
+def _citations_match_sources(
+    citations: object,
+    *,
+    source_ids: set[str],
+    sources_by_id: dict[str, dict[str, Any]],
+) -> bool:
+    """Verify structured citations resolve to the same safe snapshots as source_ids."""
+    if not isinstance(citations, list) or not citations:
+        return False
+    cited_ids: set[str] = set()
+    for citation in citations:
+        if not isinstance(citation, Mapping):
+            return False
+        passage_id = citation.get("passage_id")
+        if not isinstance(passage_id, str) or passage_id not in sources_by_id:
+            return False
+        if citation.get("source_ref") != sources_by_id[passage_id].get("source_ref"):
+            return False
+        cited_ids.add(passage_id)
+    return cited_ids == source_ids
+
+
+def _verified_claims_support(
+    claim_text: str,
+    *,
+    source_ids: set[str],
+    sources_by_id: dict[str, dict[str, Any]],
+    verified_by_id: dict[str, list[str]],
+) -> bool:
+    """Verify each cited source has policy-verified claims supporting every claim clause."""
+    combined_verified: list[str] = []
+    for sid in source_ids:
+        entries = verified_by_id.get(sid, [])
+        if not entries:
+            return False
+        combined_verified.extend(entries)
+    verified_text = " ".join(combined_verified)
+    is_verbatim_excerpt = _clause_is_verbatim_in_sources(
+        claim_text,
+        source_ids=source_ids,
+        sources_by_id=sources_by_id,
+    )
+    clauses = _claim_segments(claim_text, split_clauses=not is_verbatim_excerpt)
+    if not clauses:
+        return False
+    return all(
+        _segment_supports_claim(
+            clause,
+            verified_text,
+            min_ratio=0.25 if is_verbatim_excerpt else 0.65,
+            use_overlap_coefficient=is_verbatim_excerpt,
+        )
+        for clause in clauses
+    )
+
+
+def _clause_is_verbatim_in_sources(
+    clause: str,
+    *,
+    source_ids: set[str],
+    sources_by_id: dict[str, dict[str, Any]],
+) -> bool:
+    """Return True when a clause is an exact substring of every cited source passage."""
+    normalized_clause = _normalize_excerpt(clause)
+    return bool(normalized_clause) and all(
+        normalized_clause in _normalize_excerpt(str(sources_by_id[sid].get("passage_text", "")))
+        for sid in source_ids
+    )
+
+
+def _content_tokens(value: str) -> set[str]:
+    """Extract normalized content words for non-verbatim claim grounding."""
+    tokens = set(_TOKEN_PATTERN.findall(value.casefold()))
+    filtered = tokens - _CLAIM_STOPWORDS
+    return filtered or tokens
+
+
+def _claim_segments(claim_text: str, *, split_clauses: bool = False) -> list[str]:
+    """Split a claim into independent sentence or clause assertions."""
+    pattern = (
+        r"(?<=[.!?])\s+|;\s+|,\s+"
+        r"|\s+(?:which|who|where|when|while)\b"
+        r"|\s+(?:and|but|so|or)\s+(?=(?:this|that|it|they|there|here|you|we|he|she)\b)"
+        if split_clauses
+        else r"(?<=[.!?])\s+|;\s+"
+    )
+    segments = [
+        part.strip()
+        for part in re.split(pattern, claim_text.strip(), flags=re.I)
+        if part.strip() and _content_tokens(part)
+    ]
+    return segments or ([claim_text.strip()] if claim_text.strip() else [])
+
+
+def _segment_supports_claim(
+    segment: str,
+    reference_text: str,
+    *,
+    min_ratio: float,
+    use_overlap_coefficient: bool,
+) -> bool:
+    """Check one claim sentence/clause against individual lines/sentences of the reference."""
+    normalized_segment = _normalize_excerpt(segment)
+    normalized_ref = _normalize_excerpt(reference_text)
+    if normalized_segment and normalized_segment in normalized_ref:
+        return True
+    segment_tokens = _content_tokens(segment)
+    if not segment_tokens:
+        return False
+    ref_units = [
+        unit.strip()
+        for unit in re.split(r"(?<=[.!?])\s+|\n+", reference_text)
+        if unit.strip()
+    ] or [reference_text]
+    min_shared = min(2, len(segment_tokens))
+    for unit in ref_units:
+        unit_tokens = _content_tokens(unit)
+        if not unit_tokens:
+            continue
+        overlap = len(segment_tokens & unit_tokens)
+        denominator = (
+            min(len(segment_tokens), len(unit_tokens))
+            if use_overlap_coefficient
+            else len(segment_tokens)
+        )
+        if overlap >= min_shared and (overlap / denominator) >= min_ratio:
+            return True
+    return False
+
+
+def _text_supports_claim(
+    claim_text: str,
+    reference_text: str,
+    *,
+    min_ratio: float,
+    use_overlap_coefficient: bool = False,
+) -> bool:
+    """Require every asserted sentence/clause in a claim to be supported by the reference."""
+    effective_ratio = 0.65 if not use_overlap_coefficient and min_ratio < 0.65 else min_ratio
+    segments = _claim_segments(claim_text, split_clauses=True)
+    if not segments:
+        return False
+    if use_overlap_coefficient:
+        sentence_segments = _claim_segments(claim_text, split_clauses=False)
+        return all(
+            _segment_supports_claim(
+                segment,
+                reference_text,
+                min_ratio=effective_ratio,
+                use_overlap_coefficient=True,
+            )
+            for segment in sentence_segments
+        )
+    return all(
+        _segment_supports_claim(
+            segment,
+            reference_text,
+            min_ratio=effective_ratio,
+            use_overlap_coefficient=False,
+        )
+        for segment in segments
+    )
 
 
 def compose_cited_draft(
@@ -287,9 +594,10 @@ def compose_cited_draft(
     sources: tuple[dict[str, Any], ...],
     *,
     ticket_subject: str,
-    ticket_text: str,
+    ticket_text: str = "",
 ) -> dict[str, Any]:
-    """Frame source excerpts and render only a fixed, missing-detail question."""
+    """Frame source excerpts with passage citations for agent review."""
+    del ticket_text
     sources_by_id = {source["passage_id"]: source for source in sources}
     claims = []
     text_parts = []
@@ -334,13 +642,7 @@ def compose_cited_draft(
             "This is general documentation and does not confirm what has happened in your "
             "specific environment."
         )
-    clarifying_question = clarification_question_for_ticket(
-        generated["clarification_kind"], ticket_text
-    )
-    message_parts = [preamble, *text_parts, context_note]
-    if clarifying_question:
-        message_parts.append(clarifying_question)
-    plain_text = "\n".join(message_parts)
+    plain_text = "\n".join([preamble, *text_parts, context_note])
     return {
         "plain_text": plain_text,
         "claims": claims,

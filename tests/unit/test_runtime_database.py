@@ -6,17 +6,42 @@ import json
 import sqlite3
 from pathlib import Path
 
+from jsonschema import ValidationError
 import pytest
 
+from cloudserve_support.classification.ticket_classification import (
+    TicketClassification,
+    classification_failure,
+)
+from cloudserve_support.config import Settings
 from cloudserve_support.domain.ticket import CanonicalTicket
+from cloudserve_support.generation.draft_generation import OfflineDraftGenerationProvider
 from cloudserve_support.ingestion.ticket_normalization import normalize_ticket_record
+from cloudserve_support.knowledge.retrieval import MINIMUM_SIMILARITY, RetrievalResult
 from cloudserve_support.persistence.runtime_database import (
     connect_runtime_database,
     create_processing_run,
     create_ticket_audit_records,
+    initialize_runtime_database,
     read_run_audit_events,
 )
+from cloudserve_support.processing.run_provenance import (
+    fingerprint_classifier_model,
+    fingerprint_policy_file,
+)
 from cloudserve_support.processing.run_tickets import run_ticket_batch
+from cloudserve_support.processing.ticket_outcomes import build_ticket_outcome
+from cloudserve_support.reporting.output_schemas import (
+    OUTPUT_SCHEMA_DIRECTORY,
+    initialize_output_schemas,
+    load_output_schemas,
+    validate_output_record,
+)
+from cloudserve_support.reporting.run_exports import (
+    write_markdown_run_metrics,
+    write_run_exports,
+)
+from cloudserve_support.routing.routing_policy import RoutingPolicyEvaluator
 
 TEST_ROUTING_POLICY_PATH = (
     Path(__file__).resolve().parents[1] / "fixtures" / "decisions-routing-policy.json"
@@ -148,3 +173,524 @@ def test_audit_persistence_failure_rolls_back_and_does_not_return_success(
         ).fetchone() == ("running",)
     finally:
         connection.close()
+
+
+def _sample_kb_source(doc_id: str, passage_id: str, title: str, text: str, **extra: object) -> dict[str, object]:
+    """Build a minimal schema-valid KB passage snapshot for export and DB tests."""
+    section = "Overview"
+    snapshot: dict[str, object] = {
+        "passage_id": passage_id,
+        "doc_id": doc_id,
+        "title": title,
+        "section": section,
+        "passage_text": text,
+        "similarity": 0.88,
+        "minimum_similarity": MINIMUM_SIMILARITY,
+        "source_ref": f"data/kb/documentation.json#{doc_id}#{section}",
+        "article_version": "1.0",
+        "reviewed_at": "2026-11-01",
+        "review_interval_days": 90,
+        "approval_status": "approved",
+        "approval_status_source": "data/kb/metadata_manifest.json",
+        "metadata_owner": "capstone-kb-team",
+        "metadata_source": "data/kb/metadata_manifest.json",
+        "content_sha256": "1" * 64,
+        "metadata_manifest_sha256": "2" * 64,
+    }
+    snapshot.update(extra)
+    return snapshot
+
+
+def test_output_schemas_sync_and_validate_policy_checks_and_source_kind() -> None:
+    """AC-1: Synchronized result.schema.json validates checks[], final_decision, and source_kind."""
+    initialize_output_schemas(OUTPUT_SCHEMA_DIRECTORY)
+    schemas = load_output_schemas()
+    policy = json.loads(TEST_ROUTING_POLICY_PATH.read_text(encoding="utf-8"))
+    valid_row = {
+        "run_id": "a" * 32,
+        "input_index": 0,
+        "ticket_id": "T-SCHEMA-1",
+        "channel": "email",
+        "subject": "API key rotation",
+        "body": "How do I rotate my API key?",
+        "expected_intent": "api_key_issue",
+        "predicted_intent": "api_key_issue",
+        "expected_urgency": "medium",
+        "predicted_urgency": "medium",
+        "expected_route": "draft_for_review",
+        "predicted_route": "draft_for_review",
+        "expected_answerable_from_docs": True,
+        "predicted_answerable_from_docs": True,
+        "expected_doc_ids": ["DOC-API-001"],
+        "predicted_doc_ids": ["DOC-API-001"],
+        "expected_must_not_auto_respond": False,
+        "predicted_must_not_auto_respond": False,
+        "status": "completed",
+        "reason": "All checks passed.",
+        "classifier_confidence": 0.91,
+        "classifier_provider": "gemini",
+        "classifier_model": "gemini-decision-1",
+        "classifier_status": "classified",
+        "routing": {
+            "policy_version": policy["policy_version"],
+            "matched_rule": "classification_confident_evidence_ready",
+            "confidence_threshold": policy["classification_confidence_threshold"],
+            "threshold_source": policy["threshold_source"],
+            "calibration_method": policy["calibration_method"],
+            "calibration_source": policy["calibration_source"],
+            "policy_frozen": True,
+            "policy_provenance": {
+                "policy_version": policy["policy_version"],
+                "classification_confidence_threshold": policy["classification_confidence_threshold"],
+                "threshold_source": policy["threshold_source"],
+                "calibration_method": policy["calibration_method"],
+                "calibration_source": policy["calibration_source"],
+                "frozen": True,
+                "policy_file_sha256": "b" * 64,
+                "threshold_sha256": "c" * 64,
+                "classifier_implementation_sha256": "d" * 64,
+                "classifier_model_sha256": "e" * 64,
+            },
+            "retrieval": {
+                "status": "ready",
+                "reason_code": "sources_ready",
+                "reason": "Approved sources matched.",
+                "eligible_candidate_count": 1,
+                "excluded_candidate_counts": {},
+                "minimum_similarity": MINIMUM_SIMILARITY,
+                "embedding_model": "gemini-embedding-001",
+                "source_sha256": "f" * 64,
+                "metadata_manifest_sha256": "0" * 64,
+            },
+            "checks": [
+                {
+                    "name": "protected_rule_check",
+                    "status": "passed",
+                    "confidence": 1.0,
+                    "matched_rule": None,
+                    "protected_case": False,
+                    "reason": "No protected rule matched.",
+                },
+                {
+                    "name": "classification_confidence_check",
+                    "status": "passed",
+                    "confidence": 0.91,
+                    "threshold": 0.65,
+                    "matched_rule": None,
+                    "reason": "Confidence meets threshold.",
+                },
+                {
+                    "name": "source_presence_check",
+                    "status": "passed",
+                    "confidence": 1.0,
+                    "retrieved_doc_ids": ["DOC-API-001"],
+                    "related_doc_ids": ["DOC-SEC-001"],
+                    "excluded_source_count": 0,
+                    "matched_rule": None,
+                    "reason": "Approved primary source present.",
+                },
+                {
+                    "name": "claim_grounding_check",
+                    "status": "passed",
+                    "confidence": 0.95,
+                    "claims": [{"text": "Rotate keys in Settings.", "source_ids": ["DOC-API-001:p1"]}],
+                    "unsupported_points": [],
+                    "conflicting_points": [],
+                    "matched_rule": None,
+                    "reason": "Claims grounded.",
+                    "error_code": None,
+                },
+            ],
+            "final_decision": {
+                "route": "draft_for_review",
+                "matched_rule": "classification_confident_evidence_ready",
+                "reason": "All routing policy checks passed.",
+                "failed_check": None,
+                "protected_case": False,
+                "evidence_ready": True,
+            },
+        },
+        "sources": [
+            _sample_kb_source("DOC-API-001", "DOC-API-001:p1", "API Keys", "Rotate keys in Settings.", source_kind="primary"),
+            _sample_kb_source("DOC-SEC-001", "DOC-SEC-001:p1", "Security", "Use short-lived tokens.", source_kind="related"),
+        ],
+        "draft": {
+            "plain_text": "Rotate keys in Settings.",
+            "claims": [
+                {
+                    "text": "Rotate keys in Settings.",
+                    "source_ids": ["DOC-API-001:p1"],
+                    "citations": [{"passage_id": "DOC-API-001:p1", "source_ref": "data/kb/documentation.json#DOC-API-001"}],
+                }
+            ],
+            "unsupported_points": [],
+            "conflicting_points": [],
+            "approval_required": True,
+            "send_status": "not_sent",
+        },
+        "handoff": None,
+        "guardrails": {"checks": []},
+        "generation": {
+            "provider": "offline",
+            "model_name": "offline-extractive-v1",
+            "reasoning_effort": None,
+            "status": "generated",
+            "error_code": None,
+        },
+        "processing_duration_seconds": 0.1,
+        "draft_generation_request_duration_seconds": 0.0,
+        "processing_latency_seconds": 0.1,
+    }
+    validate_output_record(valid_row, schema_filename="result.schema.json", schemas=schemas)
+
+    extra_top_level = {**valid_row, "unexpected_field": True}
+    with pytest.raises(ValidationError):
+        validate_output_record(extra_top_level, schema_filename="result.schema.json", schemas=schemas)
+
+    extra_routing = {**valid_row, "routing": {**valid_row["routing"], "extra_routing_key": 1}}
+    with pytest.raises(ValidationError):
+        validate_output_record(extra_routing, schema_filename="result.schema.json", schemas=schemas)
+
+
+def test_ticket_label_comparison_excludes_related_sources_and_preserves_legacy_rows(
+    tmp_path: Path,
+) -> None:
+    """AC-2: ticket_label_comparison excludes related sources while preserving legacy rows."""
+    db_path = tmp_path / "runtime.sqlite3"
+    connection = connect_runtime_database(db_path)
+    try:
+        create_processing_run(
+            connection,
+            run_id="run-compat",
+            input_ref="tickets.json",
+            started_at="2026-11-10T12:00:00Z",
+            label=None,
+            output_dir="outputs/run-compat",
+        )
+        legacy_sources = [
+            _sample_kb_source("DOC-LEGACY-1", "DOC-LEGACY-1:p1", "Legacy 1", "Body 1."),
+            _sample_kb_source("DOC-LEGACY-2", "DOC-LEGACY-2:p1", "Legacy 2", "Body 2."),
+        ]
+        split_sources = [
+            _sample_kb_source("DOC-PRIMARY-1", "DOC-PRIMARY-1:p1", "Primary", "Primary body.", source_kind="primary"),
+            _sample_kb_source("DOC-RELATED-1", "DOC-RELATED-1:p1", "Related", "Related body.", source_kind="related"),
+        ]
+        for index, (ticket_id, sources) in enumerate(
+            [("T-LEGACY", legacy_sources), ("T-SPLIT", split_sources)]
+        ):
+            create_ticket_audit_records(
+                connection,
+                run_id="run-compat",
+                storage_ticket_id=ticket_id,
+                channel="email",
+                received_at=None,
+                customer_tier=None,
+                language_fluency=None,
+                context={},
+                processing_status="completed",
+                error_code=None,
+                error_message=None,
+                event_id=f"event-{index}",
+                occurred_at="2026-11-10T12:00:01Z",
+                event_type="ticket_completed",
+                input_summary="Question",
+                action_taken="draft_for_review",
+                reason="Ready.",
+                result_payload={
+                    "input_index": index,
+                    "ticket_id": ticket_id,
+                    "result": {
+                        "status": "completed",
+                        "route": "draft_for_review",
+                        "classification": {
+                            "provider_status": "classified",
+                            "intent": "api_key_issue",
+                            "urgency": "medium",
+                        },
+                        "routing": {"evidence_ready": True, "protected_case": False},
+                        "sources": sources,
+                    },
+                },
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+    # Re-run initializer non-destructively and verify existing rows + view behavior.
+    initialize_runtime_database(db_path)
+    migrated = connect_runtime_database(db_path)
+    try:
+        assert migrated.execute("SELECT COUNT(*) FROM processing_runs").fetchone()[0] == 1
+        assert migrated.execute("SELECT COUNT(*) FROM ticket_runs").fetchone()[0] == 2
+        assert migrated.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == 2
+        rows = {
+            row["ticket_id"]: row
+            for row in migrated.execute(
+                "SELECT ticket_id, generated_labels_json, generated_labels_status "
+                "FROM ticket_label_comparison"
+            ).fetchall()
+        }
+        assert rows["T-LEGACY"]["generated_labels_status"] == "available"
+        assert json.loads(rows["T-LEGACY"]["generated_labels_json"])["expected_doc_ids"] == [
+            "DOC-LEGACY-1",
+            "DOC-LEGACY-2",
+        ]
+        assert rows["T-SPLIT"]["generated_labels_status"] == "available"
+        assert json.loads(rows["T-SPLIT"]["generated_labels_json"])["expected_doc_ids"] == [
+            "DOC-PRIMARY-1",
+        ]
+    finally:
+        migrated.close()
+
+
+def test_write_run_exports_validates_multi_route_results_with_policy_checks_and_source_kind(
+    tmp_path: Path,
+) -> None:
+    """AC-3: write_run_exports validates results, decision_log, metrics, and failed_records."""
+    run_id = "b" * 32
+    policy = json.loads(TEST_ROUTING_POLICY_PATH.read_text(encoding="utf-8"))
+    policy_fingerprint = fingerprint_policy_file(TEST_ROUTING_POLICY_PATH)
+    classifier_fingerprint = fingerprint_classifier_model("gemini", "gemini-decision-1")
+    settings = Settings.from_env({"DRAFT_GENERATION_PROVIDER": "offline"})
+    evaluator = RoutingPolicyEvaluator(
+        policy,
+        claim_grounding_fn=lambda *, ticket, sources, related_sources: {
+            "claims": [
+                {
+                    "text": "Rotate API keys from the dashboard settings page.",
+                    "source_ids": ["DOC-API-001:p1"],
+                }
+            ],
+            "unsupported_points": [],
+            "conflicting_points": [],
+            "confidence": 0.96,
+            "reason": "Primary KB passage supports rotating API keys.",
+        },
+    )
+    generator = OfflineDraftGenerationProvider()
+
+    primary = _sample_kb_source(
+        "DOC-API-001",
+        "DOC-API-001:p1",
+        "API Keys",
+        "Rotate API keys from the dashboard settings page.",
+    )
+    related = _sample_kb_source(
+        "DOC-SEC-001",
+        "DOC-SEC-001:p1",
+        "Token Security",
+        "Store API keys in a secrets manager.",
+    )
+    raw_tickets = [
+        {
+            "ticket_id": "T-DRAFT",
+            "channel": "email",
+            "subject": "Rotate API key",
+            "body": "How do I rotate API keys from the dashboard settings page?",
+        },
+        {
+            "ticket_id": "T-ESCALATE",
+            "channel": "chat",
+            "subject": "Security breach",
+            "body": "Our account was hacked and unauthorized users accessed data.",
+        },
+        {
+            "ticket_id": "T-DEGRADE",
+            "channel": "web_form",
+            "subject": "Billing question",
+            "body": "Where can I download my invoice?",
+        },
+    ]
+    classifications = [
+        TicketClassification(
+            intent="api_key_issue",
+            urgency="medium",
+            confidence=0.92,
+            provider="gemini",
+            model_name="gemini-decision-1",
+            provider_status="classified",
+        ),
+        TicketClassification(
+            intent="security_incident",
+            urgency="high",
+            confidence=0.95,
+            provider="gemini",
+            model_name="gemini-decision-1",
+            provider_status="classified",
+        ),
+        classification_failure(
+            provider="gemini",
+            model_name="gemini-decision-1",
+            uncertainty="Classifier request timed out.",
+        ),
+    ]
+    retrievals = [
+        RetrievalResult(
+            status="ready",
+            reason_code="sources_ready",
+            reason="Approved primary and related sources matched.",
+            sources=(primary,),
+            related_sources=(related,),
+            eligible_candidate_count=1,
+            excluded_candidate_counts={},
+            minimum_similarity=MINIMUM_SIMILARITY,
+            embedding_model="gemini-embedding-001",
+            source_sha256="1" * 64,
+            metadata_manifest_sha256="2" * 64,
+        ),
+        RetrievalResult(
+            status="skipped",
+            reason_code="protected_case",
+            reason="Skipped retrieval for protected ticket.",
+            sources=(),
+            eligible_candidate_count=0,
+            excluded_candidate_counts={},
+            minimum_similarity=MINIMUM_SIMILARITY,
+            embedding_model="gemini-embedding-001",
+            source_sha256="1" * 64,
+            metadata_manifest_sha256="2" * 64,
+        ),
+        RetrievalResult(
+            status="skipped",
+            reason_code="classification_unavailable",
+            reason="Skipped retrieval because classification failed.",
+            sources=(),
+            eligible_candidate_count=0,
+            excluded_candidate_counts={},
+            minimum_similarity=MINIMUM_SIMILARITY,
+            embedding_model="gemini-embedding-001",
+            source_sha256="1" * 64,
+            metadata_manifest_sha256="2" * 64,
+        ),
+    ]
+
+    db_path = tmp_path / "runtime.sqlite3"
+    output_dir = tmp_path / "outputs" / run_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    input_path = tmp_path / "tickets.json"
+    input_path.write_text(json.dumps(raw_tickets), encoding="utf-8")
+
+    connection = connect_runtime_database(db_path)
+    try:
+        create_processing_run(
+            connection,
+            run_id=run_id,
+            input_ref=str(input_path),
+            started_at="2026-11-10T12:00:00Z",
+            label=None,
+            output_dir=str(output_dir),
+        )
+        for index, (raw, classification, retrieval) in enumerate(
+            zip(raw_tickets, classifications, retrievals, strict=True)
+        ):
+            ticket = normalize_ticket_record(raw, input_index=index)
+            policy_eval = evaluator.evaluate(
+                ticket=ticket,
+                classification=classification.as_dict(),
+                retrieval=retrieval,
+            )
+            decision = RoutingPolicyEvaluator.to_routing_decision(policy_eval)
+            outcome = build_ticket_outcome(
+                run_id=run_id,
+                input_index=index,
+                ticket=ticket,
+                classification=classification,
+                retrieval=retrieval,
+                decision=decision,
+                policy_evaluation=policy_eval,
+                policy=policy,
+                policy_file_fingerprint=policy_fingerprint,
+                classifier_implementation_fingerprint=classifier_fingerprint,
+                settings=settings,
+                generator=generator,
+                issues=[],
+                duplicate_ticket_id=False,
+            )
+            outcome["processing_duration_seconds"] = 0.05
+            outcome["processing_latency_seconds"] = 0.05
+            create_ticket_audit_records(
+                connection,
+                run_id=run_id,
+                storage_ticket_id=ticket.ticket_id,
+                channel=ticket.channel,
+                received_at=None,
+                customer_tier=None,
+                language_fluency=None,
+                context={},
+                processing_status="completed",
+                error_code=None,
+                error_message=None,
+                event_id=f"{index:032x}",
+                occurred_at="2026-11-10T12:00:01Z",
+                event_type="ticket_completed",
+                input_summary=ticket.body,
+                action_taken=outcome["route"],
+                reason=outcome["reason"],
+                result_payload={
+                    "input_index": index,
+                    "ticket_id": ticket.ticket_id,
+                    "result": outcome,
+                },
+                guardrail_results=outcome["guardrails"],
+            )
+        connection.commit()
+
+        write_run_exports(
+            connection,
+            run_id=run_id,
+            output_directory=output_dir,
+            input_records=raw_tickets,
+            input_path=input_path,
+            source_ref="external",
+        )
+        write_markdown_run_metrics(
+            connection,
+            run_id=run_id,
+            output_directory=output_dir,
+        )
+    finally:
+        connection.close()
+
+    schemas = load_output_schemas()
+    exported_results = [
+        json.loads(line)
+        for line in (output_dir / "results.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["routing"]["final_decision"]["route"] for row in exported_results] == [
+        "draft_for_review",
+        "escalate",
+        "degrade",
+    ]
+    assert [row["predicted_route"] for row in exported_results] == [
+        "draft_for_review",
+        "escalate",
+        None,
+    ]
+    for row in exported_results:
+        validate_output_record(row, schema_filename="result.schema.json", schemas=schemas)
+        assert isinstance(row["routing"]["checks"], list) and row["routing"]["checks"]
+        assert isinstance(row["routing"]["final_decision"], dict)
+    assert [source["source_kind"] for source in exported_results[0]["sources"]] == [
+        "primary",
+        "related",
+    ]
+
+    for line in (output_dir / "decision_log.jsonl").read_text(encoding="utf-8").splitlines():
+        validate_output_record(json.loads(line), schema_filename="decision-log.schema.json", schemas=schemas)
+    metrics_payload = json.loads((output_dir / "metrics.json").read_text(encoding="utf-8"))
+    validate_output_record(metrics_payload, schema_filename="metrics.schema.json", schemas=schemas)
+    assert {path.name for path in output_dir.iterdir()} == {
+        "results.jsonl",
+        "decision_log.jsonl",
+        "metrics.json",
+        "metrics.md",
+        "exceptions.jsonl",
+        "failure_report.json",
+        "failure_report.md",
+    }
+    for retired in ("failed_records.json", "failed_details.json", "fail_results.md"):
+        assert not (output_dir / retired).exists()
+    failure_report = json.loads((output_dir / "failure_report.json").read_text(encoding="utf-8"))
+    assert failure_report["run"]["run_id"] == run_id
+    assert failure_report["run"]["kpi_failed_record_count"] == 0
+    assert failure_report["failed_records"] == []

@@ -158,6 +158,7 @@ SELECT ticket.run_id,
                     FROM (
                         SELECT DISTINCT json_extract(source.value, '$.doc_id') AS doc_id
                         FROM json_each(signal.payload_json, '$.result.sources') AS source
+                        WHERE COALESCE(json_extract(source.value, '$.source_kind'), 'primary') = 'primary'
                         ORDER BY doc_id
                     )
                 ), '[]')),

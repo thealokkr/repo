@@ -18,7 +18,7 @@ A self-contained, CLI-first support-ticket automation capstone.
 - `.workarea/` — development-only feature specs, queue state, implementation logs, and review packets; omitted from the recipient ZIP.
 - `scripts/ingest_kb.py` — rebuilds the passage index from the packaged KB using Google Gemini embeddings.
 
-See [Agent.md](Agent.md) for repository conventions, data handling rules, and scope.
+See [AGENTS.md](AGENTS.md) for repository conventions, data handling rules, and scope.
 
 ## Python and Chroma setup
 

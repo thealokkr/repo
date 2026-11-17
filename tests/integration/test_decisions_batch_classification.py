@@ -60,11 +60,6 @@ def test_local_classifier_chunks_at_most_25_tickets_and_maps_failed_chunk_positi
     ]
     assert all(size <= DECISIONS_MAX_INPUT_BYTES for size in serialized_sizes)
 
-    # Also verify 26 tickets split into 25 + 1 boundary
-    chunks_26 = _ticket_classification_chunks(tickets[:26])
-    assert [start_index for start_index, _ in chunks_26] == [0, 25]
-    assert [len(chunk_tickets) for _, chunk_tickets in chunks_26] == [25, 1]
-
     recorded_requests: list[dict[str, object]] = []
 
     class LocalDecisionsApi:

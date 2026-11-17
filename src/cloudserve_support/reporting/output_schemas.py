@@ -637,6 +637,79 @@ RETRIEVAL_DIAGNOSTICS_SCHEMA = {
         "metadata_manifest_sha256": {"type": ["string", "null"]},
     },
 }
+POLICY_CHECK_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["name", "status", "confidence", "reason"],
+    "properties": {
+        "name": {
+            "enum": [
+                "protected_rule_check",
+                "classification_confidence_check",
+                "source_presence_check",
+                "claim_grounding_check",
+            ]
+        },
+        "status": {"enum": ["passed", "failed", "skipped"]},
+        "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "reason": {"type": "string", "minLength": 1},
+        "matched_rule": {"type": ["string", "null"], "minLength": 1},
+        "protected_case": {"type": "boolean"},
+        "threshold": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "retrieved_doc_ids": DOC_IDS_SCHEMA,
+        "related_doc_ids": DOC_IDS_SCHEMA,
+        "excluded_source_count": {"type": "integer", "minimum": 0},
+        "claims": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["text", "source_ids"],
+                "properties": {
+                    "text": {"type": "string", "minLength": 1},
+                    "source_ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string", "minLength": 1},
+                    },
+                },
+            },
+        },
+        "unsupported_points": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+        },
+        "conflicting_points": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+        },
+        "error_code": {"type": ["string", "null"], "minLength": 1},
+    },
+}
+POLICY_FINAL_DECISION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "route", "matched_rule", "reason", "failed_check",
+        "protected_case", "evidence_ready",
+    ],
+    "properties": {
+        "route": PREDICTED_ROUTE_SCHEMA,
+        "matched_rule": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1},
+        "failed_check": {
+            "enum": [
+                "protected_rule_check",
+                "classification_confidence_check",
+                "source_presence_check",
+                "claim_grounding_check",
+                None,
+            ]
+        },
+        "protected_case": {"type": "boolean"},
+        "evidence_ready": {"type": ["boolean", "null"]},
+    },
+}
 ROUTING_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -644,6 +717,7 @@ ROUTING_SCHEMA = {
         "policy_version", "matched_rule",
         "confidence_threshold", "threshold_source", "calibration_method",
         "calibration_source", "policy_frozen", "policy_provenance", "retrieval",
+        "checks", "final_decision",
     ],
     "properties": {
         "policy_version": {"type": "string", "minLength": 1},
@@ -655,6 +729,11 @@ ROUTING_SCHEMA = {
         "policy_frozen": {"const": True},
         "policy_provenance": POLICY_PROVENANCE_SCHEMA,
         "retrieval": RETRIEVAL_DIAGNOSTICS_SCHEMA,
+        "checks": {
+            "type": "array",
+            "items": POLICY_CHECK_SCHEMA,
+        },
+        "final_decision": POLICY_FINAL_DECISION_SCHEMA,
     },
 }
 SOURCE_EVIDENCE_SCHEMA = {
@@ -668,6 +747,7 @@ SOURCE_EVIDENCE_SCHEMA = {
         "similarity": {"type": "number", "minimum": 0, "maximum": 1},
         "minimum_similarity": {"type": "number", "minimum": 0, "maximum": 1},
         "source_ref": {"type": "string", "minLength": 1},
+        "source_kind": {"enum": ["primary", "related"]},
     },
 }
 DRAFT_SCHEMA = {

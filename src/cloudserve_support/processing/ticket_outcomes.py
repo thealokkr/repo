@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 from typing import Any
 
 from cloudserve_support.classification.ticket_classification import TicketClassification
@@ -13,7 +14,10 @@ from cloudserve_support.domain.ticket import CanonicalTicket
 from cloudserve_support.generation.draft_generation import (
     DraftGenerationError,
     DraftGenerationProvider,
-    parse_generated_claims,
+    draft_source_contains_private_data,
+    draft_source_contains_prompt_injection,
+    extract_verified_policy_claims,
+    validate_generated_draft,
 )
 from cloudserve_support.guardrails.draft_safety import (
     check_claim_grounding,
@@ -22,11 +26,11 @@ from cloudserve_support.guardrails.draft_safety import (
     contains_prompt_injection,
     eligible_source_subset,
     filter_evaluation_context,
+    inspect_claim_grounding,
     sanitize_handoff_content,
-    compose_cited_draft,
     ticket_text_for_generation,
 )
-from cloudserve_support.knowledge.retrieval import RetrievalResult
+from cloudserve_support.knowledge.retrieval import MINIMUM_SIMILARITY, RetrievalResult
 from cloudserve_support.processing.run_provenance import (
     fingerprint_classifier_model,
     fingerprint_policy_threshold,
@@ -42,6 +46,7 @@ def build_ticket_outcome(
     classification: TicketClassification,
     retrieval: RetrievalResult,
     decision: RoutingDecision,
+    policy_evaluation: Mapping[str, Any] | None = None,
     policy: dict[str, Any],
     policy_file_fingerprint: str,
     classifier_implementation_fingerprint: str,
@@ -58,24 +63,40 @@ def build_ticket_outcome(
     current_sources, eligibility_evidence = eligible_source_subset(retrieval.sources)
     ticket_injection_detected = contains_prompt_injection(ticket_text_for_generation(ticket))
     injected_source_count = sum(
-        contains_prompt_injection(source["passage_text"]) for source in current_sources
+        draft_source_contains_prompt_injection(source) for source in current_sources
     )
     private_source_count = sum(
-        contains_private_source_data(source)
+        contains_private_source_data(source) or draft_source_contains_private_data(source)
         for source in current_sources
     )
     eligible_sources = tuple(
         source
         for source in current_sources
-        if not contains_prompt_injection(source["passage_text"])
+        if not draft_source_contains_prompt_injection(source)
         and not contains_private_source_data(source)
+        and not draft_source_contains_private_data(source)
+    )
+    eligible_related_sources = _screen_related_sources_for_drafting(
+        retrieval.related_sources,
+        primary_sources=eligible_sources,
+    )
+    retained_sources = (
+        *(_tag_source_snapshot(source, source_kind="primary") for source in eligible_sources),
+        *(
+            _tag_source_snapshot(source, source_kind="related")
+            for source in eligible_related_sources
+        ),
     )
     eligibility_evidence += (
         f" {injected_source_count} instruction-bearing source(s) and "
         f"{private_source_count} private-data source(s) excluded."
     )
+    scrubbed_context_value = filter_evaluation_context(ticket.context)
+    scrubbed_context = (
+        scrubbed_context_value if isinstance(scrubbed_context_value, dict) else {}
+    )
     private_input_text = json.dumps(
-        filter_evaluation_context(ticket.context), ensure_ascii=False, default=str
+        scrubbed_context, ensure_ascii=False, default=str
     )
     private_input_detected = contains_private_data(
         ticket_text_for_generation(ticket)
@@ -100,10 +121,16 @@ def build_ticket_outcome(
             policy["classifier_provider"], policy["classifier_model"]
         ),
     }
+    (
+        policy_route,
+        policy_matched_rule,
+        policy_reason,
+        policy_protected_case,
+    ) = _resolve_policy_decision(policy_evaluation, decision)
     routing_fields = {
         "policy_version": policy["policy_version"],
-        "matched_rule": decision.matched_rule,
-        "protected_case": decision.protected_case,
+        "matched_rule": policy_matched_rule,
+        "protected_case": policy_protected_case,
         "evidence_ready": evidence_ready,
         "confidence_threshold": policy["classification_confidence_threshold"],
         "threshold_source": policy["threshold_source"],
@@ -113,6 +140,15 @@ def build_ticket_outcome(
         "policy_provenance": policy_provenance,
         "retrieval": retrieval_payload,
     }
+    if isinstance(policy_evaluation, Mapping):
+        policy_checks = policy_evaluation.get("checks")
+        if isinstance(policy_checks, list):
+            routing_fields["checks"] = [
+                dict(item) for item in policy_checks if isinstance(item, Mapping)
+            ]
+        policy_final_decision = policy_evaluation.get("final_decision")
+        if isinstance(policy_final_decision, Mapping):
+            routing_fields["final_decision"] = dict(policy_final_decision)
     guardrail_checks = [
         _make_guardrail_check(
             "source_eligibility",
@@ -164,11 +200,11 @@ def build_ticket_outcome(
         ),
     ]
 
-    route = "degrade" if issues else decision.route
+    route = "degrade" if issues else policy_route
     reason = (
         f"Ticket could not be processed: {'; '.join(issues)}."
         if issues
-        else decision.reason
+        else policy_reason
     )
     error: dict[str, str] | None = None
     if issues:
@@ -179,19 +215,25 @@ def build_ticket_outcome(
     failed_classification = classification.provider_status != "classified"
     if error is None and not pre_provider_guardrail_block and (
         failed_classification
-        or decision.matched_rule == "classification_unavailable_or_model_mismatch"
+        or policy_matched_rule == "classification_unavailable_or_model_mismatch"
     ):
         error = {
             "code": "classification_unavailable",
             "message": classification.failure_reason
             or "Classification did not match the frozen policy model.",
         }
-        if not decision.protected_case:
+        if not policy_protected_case:
             route = "degrade"
             reason = "Classification is unavailable; the ticket is available for human review."
     elif error is None and pre_provider_guardrail_block:
-        route = decision.route
-        reason = decision.reason
+        route = policy_route
+        reason = policy_reason
+    elif error is None and policy_route == "degrade":
+        error = _resolve_routing_degrade_error(
+            policy_evaluation=policy_evaluation,
+            matched_rule=policy_matched_rule,
+            reason=policy_reason,
+        )
 
     generation = {
         "provider": generator.name,
@@ -201,9 +243,10 @@ def build_ticket_outcome(
         "error_code": None,
     }
     draft: dict[str, Any] | None = None
+    post_draft_diagnostics: dict[str, Any] | None = None
     draft_generation_request_duration_seconds = 0.0
     _report_ticket_step(progress_callback, "Checking draft eligibility")
-    if route == "draft_for_review" and error is None:
+    if policy_route == "draft_for_review" and route == "draft_for_review" and error is None:
         if injection_detected:
             _report_ticket_step(
                 progress_callback,
@@ -233,123 +276,44 @@ def build_ticket_outcome(
             route = "escalate"
             reason = "No source passed the eligibility guardrail for drafting."
         else:
-            try:
-                _report_ticket_step(progress_callback, "Generating draft")
-                raw_generated = generator.generate_claims(
-                    ticket,
-                    sources=eligible_sources,
-                    model_name=settings.llm_model,
-                )
-                draft_generation_request_duration_seconds = (
-                    _read_generation_request_duration(generator)
-                )
+            operational_ticket = replace(ticket, context=scrubbed_context)
+            sanitized_policy_evaluation = _sanitize_policy_evaluation(policy_evaluation)
+            if not _has_verified_drafting_claims(
+                sanitized_policy_evaluation,
+                primary_sources=eligible_sources,
+                related_sources=eligible_related_sources,
+            ):
                 _report_ticket_step(
                     progress_callback,
-                    "Validating draft structure, citations, and privacy",
+                    "Draft skipped because policy-verified claims are missing",
                 )
-                generated = parse_generated_claims(raw_generated)
-                generation["status"] = "generated"
-                generated_text = " ".join(item["text"] for item in generated["claims"])
-                private_output_detected = contains_private_data(generated_text)
-                grounded, grounding_evidence = check_claim_grounding(
-                    generated["claims"], eligible_sources
-                )
-                has_model_findings = bool(
-                    generated["unsupported_points"] or generated["conflicting_points"]
-                )
-                if has_model_findings:
-                    grounded = False
-                    grounding_evidence = (
-                        "The provider reported unsupported or conflicting points; draft withheld."
-                    )
-                draft_candidate = None
-                if grounded and not has_model_findings:
-                    draft_candidate = compose_cited_draft(
-                        generated,
-                        eligible_sources,
-                        ticket_subject=ticket.subject,
-                        ticket_text=ticket_text_for_generation(ticket),
-                    )
-                    private_output_detected = private_output_detected or contains_private_data(
-                        draft_candidate["plain_text"]
-                    )
-                guardrail_checks.extend(
-                    [
-                        _make_guardrail_check(
-                            "output_structure",
-                            passed=True,
-                            blocked=False,
-                            evidence="Provider JSON matches the strict draft contract.",
-                            action="continue",
-                        ),
-                        _make_guardrail_check(
-                            "citation_grounding",
-                            passed=grounded,
-                            blocked=not grounded,
-                            evidence=grounding_evidence,
-                            action="continue" if grounded else "block_and_escalate",
-                        ),
-                        _make_guardrail_check(
-                            "private_data_output",
-                            passed=not private_output_detected,
-                            blocked=private_output_detected,
-                            evidence=(
-                                "Generated text contains an email, credential-like value, or national identifier."
-                                if private_output_detected
-                                else "Generated text passed the private-data screen."
-                            ),
-                            action="block_and_escalate" if private_output_detected else "continue",
-                        ),
-                    ]
-                )
-                if private_output_detected or not grounded:
-                    route = "escalate"
-                    reason = (
-                        "Generated content failed a privacy or source-grounding check; "
-                        "the draft was withheld for human review."
-                    )
-                else:
-                    draft = draft_candidate
-            except DraftGenerationError as generation_error:
-                draft_generation_request_duration_seconds = (
-                    _read_generation_request_duration(generator)
-                )
-                generation["status"] = "failed"
-                generation["error_code"] = generation_error.code
-                error = {
-                    "code": generation_error.code,
-                    "message": str(generation_error),
-                }
                 route = "degrade"
-                reason = "Draft generation failed; the ticket is available for human review."
-                _report_ticket_step(
-                    progress_callback,
-                    "Draft generation or validation failed; degrading ticket",
+                reason = (
+                    "Routing policy evaluation is missing verified grounding claims; "
+                    "manual review is required."
                 )
-                guardrail_checks.extend(
-                    _make_failed_draft_checks(str(generation_error))
+                error = {"code": "routing_policy_invalid", "message": reason}
+            else:
+                (
+                    draft,
+                    route,
+                    reason,
+                    error,
+                    draft_generation_request_duration_seconds,
+                    draft_guardrail_checks,
+                    post_draft_diagnostics,
+                ) = _attempt_draft_generation(
+                    ticket=operational_ticket,
+                    eligible_sources=eligible_sources,
+                    eligible_related_sources=eligible_related_sources,
+                    policy_evaluation=sanitized_policy_evaluation,
+                    default_reason=reason,
+                    settings=settings,
+                    generator=generator,
+                    generation=generation,
+                    progress_callback=progress_callback,
                 )
-            except Exception as unexpected_generation_error:
-                draft_generation_request_duration_seconds = (
-                    _read_generation_request_duration(generator)
-                )
-                generation["status"] = "failed"
-                generation["error_code"] = "generation_provider_error"
-                error = {
-                    "code": "generation_provider_error",
-                    "message": "The configured generation provider could not complete this ticket.",
-                }
-                route = "degrade"
-                reason = "Draft generation failed; the ticket is available for human review."
-                _report_ticket_step(
-                    progress_callback,
-                    "Draft generation or validation failed; degrading ticket",
-                )
-                guardrail_checks.extend(
-                    _make_failed_draft_checks(
-                        f"Provider failure type: {type(unexpected_generation_error).__name__}."
-                    )
-                )
+                guardrail_checks.extend(draft_guardrail_checks)
     else:
         _report_ticket_step(
             progress_callback,
@@ -382,26 +346,29 @@ def build_ticket_outcome(
                 ),
             ]
         )
-    guardrail_checks.append(
-        _make_guardrail_check(
-            "instruction_integrity",
-            passed=not injection_detected,
-            blocked=injection_detected,
-            evidence=(
-                "Instruction-like content was not followed and the ticket was escalated."
-                if injection_detected
-                else "Provider instructions and untrusted-data boundaries were preserved."
-            ),
-            action="block_and_escalate" if injection_detected else "enforced",
+    if not any(check["check"] == "instruction_integrity" for check in guardrail_checks):
+        guardrail_checks.append(
+            _make_guardrail_check(
+                "instruction_integrity",
+                passed=not injection_detected,
+                blocked=injection_detected,
+                evidence=(
+                    "Instruction-like content was not followed and the ticket was escalated."
+                    if injection_detected
+                    else "Provider instructions and untrusted-data boundaries were preserved."
+                ),
+                action="block_and_escalate" if injection_detected else "enforced",
+            )
         )
-    )
 
     if error and error["code"] in {"invalid_ticket_record", "duplicate_ticket_id"}:
         routing_fields["matched_rule"] = "ticket_validation_failed"
         routing_fields["protected_case"] = False
-    elif route != decision.route:
+    elif route != policy_route:
         if route == "degrade" and error and error["code"] == "classification_unavailable":
             routing_fields["matched_rule"] = "classification_unavailable_or_model_mismatch"
+        elif route == "degrade" and error and error["code"] == "routing_policy_invalid":
+            routing_fields["matched_rule"] = "routing_policy_invalid"
         elif route == "degrade" and generation["status"] == "failed":
             routing_fields["matched_rule"] = "generation_unavailable"
         else:
@@ -414,7 +381,7 @@ def build_ticket_outcome(
             ticket,
             classification=classification_payload,
             retrieval=retrieval_payload,
-            sources=eligible_sources,
+            sources=retained_sources,
             reason=reason,
             classification_failure_reason=classification.failure_reason,
             attempted_steps=_describe_attempted_steps(
@@ -472,13 +439,363 @@ def build_ticket_outcome(
         "draft_generation_request_duration_seconds": (
             draft_generation_request_duration_seconds
         ),
-        "sources": list(eligible_sources),
+        "sources": list(retained_sources),
         "classification": classification_payload,
         "routing": routing_fields,
     }
     if error:
         result["error"] = error
+    if post_draft_diagnostics is not None:
+        result["post_draft_diagnostics"] = post_draft_diagnostics
     return result
+
+
+def _resolve_policy_decision(
+    policy_evaluation: Mapping[str, Any] | None,
+    decision: RoutingDecision,
+) -> tuple[str, str, str, bool]:
+    """Resolve route metadata from final_decision, failing closed if draft policy is missing."""
+    final_decision = (
+        policy_evaluation.get("final_decision")
+        if isinstance(policy_evaluation, Mapping)
+        else None
+    )
+    route = final_decision.get("route") if isinstance(final_decision, Mapping) else None
+    if isinstance(final_decision, Mapping) and route in {"draft_for_review", "escalate", "degrade"}:
+        matched_rule = final_decision.get("matched_rule")
+        reason = final_decision.get("reason")
+        if isinstance(matched_rule, str) and matched_rule and isinstance(reason, str) and reason:
+            return route, matched_rule, reason, bool(final_decision.get("protected_case"))
+    if policy_evaluation is None and decision.route in {"escalate", "degrade"}:
+        return decision.route, decision.matched_rule, decision.reason, decision.protected_case
+    return (
+        "degrade",
+        "routing_policy_invalid",
+        "Routing policy final_decision is missing or invalid; manual review is required.",
+        False,
+    )
+
+
+def _has_verified_drafting_claims(
+    policy_evaluation: Mapping[str, Any] | None,
+    *,
+    primary_sources: tuple[dict[str, Any], ...],
+    related_sources: tuple[dict[str, Any], ...],
+) -> bool:
+    """Confirm policy_evaluation supplies non-empty verified claims against safe sources."""
+    allowed_ids = {
+        identifier
+        for source in (*primary_sources, *related_sources)
+        for identifier in (source.get("passage_id"), source.get("doc_id"))
+        if isinstance(identifier, str) and identifier
+    }
+    return bool(
+        extract_verified_policy_claims(
+            policy_evaluation,
+            allowed_source_ids=allowed_ids,
+        )
+    )
+
+
+def _sanitize_policy_evaluation(
+    policy_evaluation: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Strip any evaluation keys from policy-check input before passing to drafting."""
+    if policy_evaluation is None:
+        return None
+    scrubbed = filter_evaluation_context(dict(policy_evaluation))
+    return scrubbed if isinstance(scrubbed, dict) else None
+
+
+def _is_safe_eligible_related_source(candidate: object) -> bool:
+    """Verify a related KB snapshot is approved, fresh, provenance-valid, and free of unsafe text."""
+    if not isinstance(candidate, dict):
+        return False
+    validation_view = (
+        {
+            **candidate,
+            "similarity": MINIMUM_SIMILARITY,
+            "minimum_similarity": MINIMUM_SIMILARITY,
+        }
+        if candidate.get("similarity") is None and candidate.get("minimum_similarity") is None
+        else candidate
+    )
+    eligible, _ = eligible_source_subset((validation_view,))
+    if not eligible:
+        return False
+    return (
+        not draft_source_contains_prompt_injection(candidate)
+        and not contains_private_source_data(candidate)
+        and not draft_source_contains_private_data(candidate)
+    )
+
+
+def _tag_source_snapshot(
+    source: Mapping[str, Any],
+    *,
+    source_kind: str,
+) -> dict[str, Any]:
+    """Tag a retained source snapshot with source_kind and schema-valid numeric scores."""
+    tagged = dict(source)
+    tagged["source_kind"] = source_kind
+    if source_kind == "related":
+        if tagged.get("similarity") is None:
+            tagged["similarity"] = 0.0
+        if tagged.get("minimum_similarity") is None:
+            tagged["minimum_similarity"] = MINIMUM_SIMILARITY
+    return tagged
+
+
+def _screen_related_sources_for_drafting(
+    related_sources: tuple[dict[str, Any], ...],
+    *,
+    primary_sources: tuple[dict[str, Any], ...],
+) -> tuple[dict[str, Any], ...]:
+    """Keep unique approved, fresh, safe related articles not already in primary sources."""
+    seen_doc_ids = {source["doc_id"] for source in primary_sources}
+    accepted: list[dict[str, Any]] = []
+    for candidate in related_sources:
+        if not _is_safe_eligible_related_source(candidate):
+            continue
+        doc_id = candidate["doc_id"]
+        if doc_id in seen_doc_ids:
+            continue
+        seen_doc_ids.add(doc_id)
+        accepted.append(candidate)
+    return tuple(accepted)
+
+
+def _attempt_draft_generation(
+    *,
+    ticket: CanonicalTicket,
+    eligible_sources: tuple[dict[str, Any], ...],
+    eligible_related_sources: tuple[dict[str, Any], ...],
+    policy_evaluation: Mapping[str, Any] | None,
+    default_reason: str,
+    settings: Settings,
+    generator: DraftGenerationProvider,
+    generation: dict[str, Any],
+    progress_callback: Callable[[str], None] | None,
+) -> tuple[
+    dict[str, Any] | None,
+    str,
+    str,
+    dict[str, str] | None,
+    float,
+    list[dict[str, Any]],
+    dict[str, Any] | None,
+]:
+    """Invoke closed-world drafting and validate structure, citations, and privacy."""
+    try:
+        _report_ticket_step(progress_callback, "Generating draft")
+        raw_draft = generator.generate_draft(
+            ticket,
+            sources=eligible_sources,
+            related_sources=eligible_related_sources,
+            policy_evaluation=policy_evaluation,
+            model_name=settings.llm_model,
+        )
+        duration = _read_generation_request_duration(generator)
+        _report_ticket_step(
+            progress_callback,
+            "Validating draft structure, citations, and privacy",
+        )
+        draft_candidate = validate_generated_draft(raw_draft)
+        generation["status"] = "generated"
+    except DraftGenerationError as generation_error:
+        duration = _read_generation_request_duration(generator)
+        generation["status"] = "failed"
+        generation["error_code"] = generation_error.code
+        error = {"code": generation_error.code, "message": str(generation_error)}
+        _report_ticket_step(
+            progress_callback,
+            "Draft generation or validation failed; degrading ticket",
+        )
+        return (
+            None,
+            "degrade",
+            "Draft generation failed; the ticket is available for human review.",
+            error,
+            duration,
+            _make_failed_draft_checks(str(generation_error)),
+            None,
+        )
+    except Exception as unexpected_generation_error:
+        duration = _read_generation_request_duration(generator)
+        generation["status"] = "failed"
+        generation["error_code"] = "generation_provider_error"
+        error = {
+            "code": "generation_provider_error",
+            "message": "The configured generation provider could not complete this ticket.",
+        }
+        _report_ticket_step(
+            progress_callback,
+            "Draft generation or validation failed; degrading ticket",
+        )
+        return (
+            None,
+            "degrade",
+            "Draft generation failed; the ticket is available for human review.",
+            error,
+            duration,
+            _make_failed_draft_checks(
+                f"Provider failure type: {type(unexpected_generation_error).__name__}."
+            ),
+            None,
+        )
+
+    all_safe_sources = (*eligible_sources, *eligible_related_sources)
+    allowed_source_ids = {
+        identifier
+        for source in all_safe_sources
+        for identifier in (source.get("passage_id"), source.get("doc_id"))
+        if isinstance(identifier, str) and identifier
+    }
+    verified_claims = extract_verified_policy_claims(
+        policy_evaluation,
+        allowed_source_ids=allowed_source_ids,
+    )
+    draft, route, reason, checks, post_draft_diagnostics = (
+        _evaluate_generated_draft_guardrails(
+            draft_candidate=draft_candidate,
+            all_safe_sources=all_safe_sources,
+            verified_claims=verified_claims,
+            default_reason=default_reason,
+        )
+    )
+    return draft, route, reason, None, duration, checks, post_draft_diagnostics
+
+
+def _evaluate_generated_draft_guardrails(
+    *,
+    draft_candidate: dict[str, Any],
+    all_safe_sources: tuple[dict[str, Any], ...],
+    verified_claims: list[dict[str, Any]],
+    default_reason: str,
+) -> tuple[
+    dict[str, Any] | None,
+    str,
+    str,
+    list[dict[str, Any]],
+    dict[str, Any] | None,
+]:
+    """Screen generated draft claims and prose for grounding, privacy, and instruction safety."""
+    claim_texts = " ".join(item["text"] for item in draft_candidate["claims"])
+    private_output_detected = contains_private_data(claim_texts) or contains_private_data(
+        draft_candidate["plain_text"]
+    )
+    output_injection_detected = contains_prompt_injection(
+        claim_texts
+    ) or contains_prompt_injection(draft_candidate["plain_text"])
+    grounded, grounding_evidence = check_claim_grounding(
+        draft_candidate["claims"],
+        all_safe_sources,
+        verified_claims=verified_claims,
+    )
+    if draft_candidate["unsupported_points"] or draft_candidate["conflicting_points"]:
+        grounded = False
+        grounding_evidence = (
+            "The provider reported unsupported or conflicting points; draft withheld."
+        )
+    checks = [
+        _make_guardrail_check(
+            "output_structure",
+            passed=True,
+            blocked=False,
+            evidence="Provider JSON matches the strict draft contract.",
+            action="continue",
+        ),
+        _make_guardrail_check(
+            "citation_grounding",
+            passed=grounded,
+            blocked=not grounded,
+            evidence=grounding_evidence,
+            action="continue" if grounded else "block_and_escalate",
+        ),
+        _make_guardrail_check(
+            "private_data_output",
+            passed=not private_output_detected,
+            blocked=private_output_detected,
+            evidence=(
+                "Generated text contains an email, credential-like value, or national identifier."
+                if private_output_detected
+                else "Generated text passed the private-data screen."
+            ),
+            action="block_and_escalate" if private_output_detected else "continue",
+        ),
+        _make_guardrail_check(
+            "instruction_integrity",
+            passed=not output_injection_detected,
+            blocked=output_injection_detected,
+            evidence=(
+                "Generated text contains an instruction-override pattern and was withheld."
+                if output_injection_detected
+                else "Provider instructions and untrusted-data boundaries were preserved."
+            ),
+            action="block_and_escalate" if output_injection_detected else "enforced",
+        ),
+    ]
+    if private_output_detected or output_injection_detected or not grounded:
+        post_draft_diagnostics = _build_sanitized_post_draft_diagnostics(
+            draft_candidate=draft_candidate,
+            all_safe_sources=all_safe_sources,
+            verified_claims=verified_claims,
+        )
+        return (
+            None,
+            "escalate",
+            "Generated content failed a privacy, instruction-integrity, or source-grounding check; "
+            "the draft was withheld for human review.",
+            checks,
+            post_draft_diagnostics,
+        )
+    return draft_candidate, "draft_for_review", default_reason, checks, None
+
+
+def _build_sanitized_post_draft_diagnostics(
+    *,
+    draft_candidate: Mapping[str, Any],
+    all_safe_sources: tuple[dict[str, Any], ...],
+    verified_claims: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Capture and redact withheld draft claims, unsupported points, and failed clauses."""
+    claims = list(draft_candidate["claims"])
+    grounding_inspection = inspect_claim_grounding(
+        claims,
+        all_safe_sources,
+        verified_claims=verified_claims,
+    )
+    raw_diagnostics = {
+        "withheld_claims": [
+            {
+                "text": item["text"],
+                "source_ids": list(item["source_ids"]),
+            }
+            for item in claims
+        ],
+        "unsupported_points": list(draft_candidate["unsupported_points"]),
+        "conflicting_points": list(draft_candidate["conflicting_points"]),
+        "failed_claims": grounding_inspection["failed_claims"],
+        "minimum_ratio": grounding_inspection["minimum_ratio"],
+    }
+    sanitized_diagnostics, _, _ = sanitize_handoff_content(raw_diagnostics)
+    return sanitized_diagnostics  # type: ignore[return-value]
+
+
+def _resolve_routing_degrade_error(
+    *,
+    policy_evaluation: Mapping[str, Any] | None,
+    matched_rule: str,
+    reason: str,
+) -> dict[str, str]:
+    """Extract a structured per-ticket error when a routing policy check fails closed."""
+    if policy_evaluation is None:
+        return {"code": matched_rule, "message": reason}
+    for check in policy_evaluation.get("checks", ()):
+        error_code = check.get("error_code")
+        if check.get("status") == "failed" and isinstance(error_code, str) and error_code:
+            return {"code": error_code, "message": reason}
+    return {"code": matched_rule, "message": reason}
 
 
 def _report_ticket_step(

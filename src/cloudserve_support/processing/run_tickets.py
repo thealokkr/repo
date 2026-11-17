@@ -7,7 +7,7 @@ import re
 import sqlite3
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -64,8 +64,10 @@ from cloudserve_support.routing.policy_calibration import (
 )
 from cloudserve_support.processing.ticket_outcomes import build_ticket_outcome
 from cloudserve_support.routing.routing_policy import (
+    CLAIM_GROUNDING_PROMPT_VERSION,
     RoutingDecision,
-    route_ticket_classification,
+    RoutingPolicyEvaluator,
+    create_claim_grounding_checker,
 )
 
 
@@ -89,6 +91,7 @@ class _PreparedTicket:
     classification: TicketClassification | None
     retrieval: RetrievalResult | None = None
     decision: RoutingDecision | None = None
+    policy_evaluation: dict[str, Any] | None = None
     classification_request_duration_seconds: float = 0.0
 
 
@@ -248,6 +251,10 @@ def run_ticket_batch(
         _report_run_progress(progress_callback, "Retrieval", "done")
 
         _report_run_progress(progress_callback, "Routing", "in_progress")
+        routing_evaluator = RoutingPolicyEvaluator(
+            policy,
+            claim_grounding_fn=create_claim_grounding_checker(settings),
+        )
         for prepared_ticket in prepared_tickets:
             classification = prepared_ticket.classification
             if classification is None:
@@ -260,22 +267,34 @@ def run_ticket_batch(
             retrieval = prepared_ticket.retrieval
             if retrieval is None:
                 raise RuntimeError("Ticket retrieval phase did not resolve every input position.")
-            prepared_ticket.decision = route_ticket_classification(
-                classification.as_dict(),
-                policy,
-                evidence_ready=retrieval.evidence_ready,
+            policy_evaluation = route_ticket_classification(
+                routing_evaluator,
                 ticket=prepared_ticket.ticket,
+                classification=classification.as_dict(),
+                retrieval=retrieval,
                 pre_provider_guardrail_blocked=prepared_ticket.pre_provider_guardrail_block,
             )
+            prepared_ticket.policy_evaluation = policy_evaluation
+            prepared_ticket.decision = RoutingPolicyEvaluator.to_routing_decision(
+                policy_evaluation
+            )
             decision = prepared_ticket.decision
+            used_gemini_grounding = _routing_used_gemini_grounding(
+                policy_evaluation,
+                settings,
+            )
             _persist_stage_checkpoint(
                 connection,
                 run_id=run_id,
                 prepared_ticket=prepared_ticket,
                 stage="routing",
                 status="decided",
-                value=asdict(decision),
+                value=policy_evaluation,
                 reason=decision.reason,
+                model_name=settings.llm_model if used_gemini_grounding else None,
+                prompt_version=(
+                    CLAIM_GROUNDING_PROMPT_VERSION if used_gemini_grounding else None
+                ),
             )
         _report_run_progress(progress_callback, "Routing", "done")
 
@@ -477,6 +496,36 @@ def _commit_ticket_records(connection: sqlite3.Connection) -> None:
     connection.commit()
 
 
+def route_ticket_classification(
+    evaluator: RoutingPolicyEvaluator,
+    *,
+    ticket: CanonicalTicket,
+    classification: dict[str, Any],
+    retrieval: RetrievalResult,
+    pre_provider_guardrail_blocked: bool,
+) -> dict[str, Any]:
+    """Evaluate the ordered routing policy checks for one retrieved ticket."""
+    return evaluator.evaluate(
+        ticket=ticket,
+        classification=classification,
+        retrieval=retrieval,
+        pre_provider_guardrail_blocked=pre_provider_guardrail_blocked,
+    )
+
+
+def _routing_used_gemini_grounding(
+    policy_evaluation: dict[str, Any],
+    settings: Settings,
+) -> bool:
+    """Return whether routing invoked the Gemini claim grounding check rather than skipping it."""
+    if settings.draft_generation_provider == "OFFLINE":
+        return False
+    for check in policy_evaluation.get("checks", ()):
+        if check.get("name") == "claim_grounding_check":
+            return check.get("status") != "skipped"
+    return False
+
+
 def _persist_stage_checkpoint(
     connection: sqlite3.Connection,
     *,
@@ -487,6 +536,7 @@ def _persist_stage_checkpoint(
     value: dict[str, Any],
     reason: str,
     model_name: str | None = None,
+    prompt_version: str | None = None,
     prediction: dict[str, Any] | None = None,
 ) -> None:
     """Commit a source-safe typed result before the next pipeline stage begins."""
@@ -509,6 +559,7 @@ def _persist_stage_checkpoint(
         },
         input_summary=ticket.body if stage == "classification" else None,
         model_name=model_name,
+        prompt_version=prompt_version,
         prediction=prediction,
         reason=reason,
     )
@@ -594,6 +645,7 @@ def _build_ticket_result(
         classification=classification,
         retrieval=retrieval,
         decision=decision,
+        policy_evaluation=prepared_ticket.policy_evaluation,
         policy=policy,
         policy_file_fingerprint=policy_file_fingerprint,
         classifier_implementation_fingerprint=classifier_implementation_fingerprint,

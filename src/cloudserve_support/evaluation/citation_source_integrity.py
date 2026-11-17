@@ -6,6 +6,8 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from cloudserve_support.guardrails.draft_safety import _text_supports_claim
+
 
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 SOURCE_PROVENANCE_FIELDS = (
@@ -165,7 +167,12 @@ def evaluate_citation_source_integrity(
                 )
                 if excerpt_matches:
                     exact_excerpt_pair_count += 1
-                else:
+                claim_supported = (
+                    isinstance(claim_text, str)
+                    and isinstance(passage_text, str)
+                    and _text_supports_claim(claim_text, passage_text, min_ratio=0.35)
+                )
+                if not claim_supported:
                     _increment(failure_counts, "claim_excerpt_mismatch")
                     all_pairs_valid = False
             if all_pairs_valid:
