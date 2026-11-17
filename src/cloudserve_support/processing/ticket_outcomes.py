@@ -70,6 +70,8 @@ def build_ticket_outcome(
     generator: DraftGenerationProvider,
     issues: list[str],
     duplicate_ticket_id: bool,
+    skip_draft: bool = False,
+    skip_draft_review: bool = False,
     progress_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Return the final structured draft, complete handoff, or safe degradation."""
@@ -187,6 +189,7 @@ def build_ticket_outcome(
     }
     draft: dict[str, Any] | None = None
     post_draft_diagnostics: dict[str, Any] | None = None
+    draft_generation_skipped = False
     draft_generation_request_duration_seconds = 0.0
     _report_ticket_step(progress_callback, "Checking draft eligibility")
     if policy_route == "draft_for_review" and route == "draft_for_review" and error is None:
@@ -218,6 +221,11 @@ def build_ticket_outcome(
             )
             route = "escalate"
             reason = "No source passed the eligibility guardrail for drafting."
+        elif skip_draft:
+            draft_generation_skipped = True
+            route = "escalate"
+            reason = "Draft generation skipped by --skip-draft; human review is required."
+            _report_ticket_step(progress_callback, "Draft generation skipped by --skip-draft")
         else:
             operational_ticket = replace(ticket, context=scrubbed_context)
             sanitized_policy_evaluation = _sanitize_policy_evaluation(policy_evaluation)
@@ -253,6 +261,7 @@ def build_ticket_outcome(
                     default_reason=reason,
                     settings=settings,
                     generator=generator,
+                    skip_review=skip_draft_review,
                     generation=generation,
                     progress_callback=progress_callback,
                 )
@@ -308,7 +317,9 @@ def build_ticket_outcome(
         routing_fields["matched_rule"] = "ticket_validation_failed"
         routing_fields["protected_case"] = False
     elif route != policy_route:
-        if route == "degrade" and error and error["code"] == "classification_unavailable":
+        if draft_generation_skipped:
+            routing_fields["matched_rule"] = "draft_generation_skipped"
+        elif route == "degrade" and error and error["code"] == "classification_unavailable":
             routing_fields["matched_rule"] = "classification_unavailable_or_model_mismatch"
         elif route == "degrade" and error and error["code"] == "routing_policy_invalid":
             routing_fields["matched_rule"] = "routing_policy_invalid"
@@ -518,6 +529,7 @@ def _attempt_draft_generation(
     default_reason: str,
     settings: Settings,
     generator: DraftGenerationProvider,
+    skip_review: bool,
     generation: dict[str, Any],
     progress_callback: Callable[[str], None] | None,
 ) -> tuple[
@@ -529,7 +541,7 @@ def _attempt_draft_generation(
     list[dict[str, Any]],
     dict[str, Any] | None,
 ]:
-    """Invoke closed-world drafting and validate structure, citations, and privacy."""
+    """Generate one draft, optionally bypassing its in-run review checks."""
     try:
         _report_ticket_step(progress_callback, "Generating draft")
         raw_draft = generator.generate_draft(
@@ -540,11 +552,15 @@ def _attempt_draft_generation(
             model_name=settings.llm_model,
         )
         duration = _read_generation_request_duration(generator)
-        _report_ticket_step(
-            progress_callback,
-            "Validating draft structure, citations, and privacy",
+        draft, route, reason, checks, post_draft_diagnostics = _review_generated_draft(
+            raw_draft,
+            eligible_sources=eligible_sources,
+            eligible_related_sources=eligible_related_sources,
+            policy_evaluation=policy_evaluation,
+            default_reason=default_reason,
+            skip_review=skip_review,
+            progress_callback=progress_callback,
         )
-        draft_candidate = validate_generated_draft(raw_draft)
         generation["status"] = "generated"
     except DraftGenerationError as generation_error:
         duration = _read_generation_request_duration(generator)
@@ -588,6 +604,53 @@ def _attempt_draft_generation(
             None,
         )
 
+    return draft, route, reason, None, duration, checks, post_draft_diagnostics
+
+
+def _review_generated_draft(
+    raw_draft: dict[str, Any],
+    *,
+    eligible_sources: tuple[dict[str, Any], ...],
+    eligible_related_sources: tuple[dict[str, Any], ...],
+    policy_evaluation: Mapping[str, Any] | None,
+    default_reason: str,
+    skip_review: bool,
+    progress_callback: Callable[[str], None] | None,
+) -> tuple[
+    dict[str, Any] | None,
+    str,
+    str,
+    list[dict[str, Any]],
+    dict[str, Any] | None,
+]:
+    """Validate a generated draft and apply in-run safety checks unless explicitly skipped."""
+    if skip_review:
+        _report_ticket_step(
+            progress_callback,
+            "Generated-draft review skipped by --skip-draft-review",
+        )
+        checks = [
+            _make_guardrail_check(
+                check,
+                passed=True,
+                blocked=False,
+                evidence="Not evaluated because --skip-draft-review was set.",
+                action="skipped",
+            )
+            for check in (
+                "output_structure",
+                "citation_grounding",
+                "private_data_output",
+                "instruction_integrity",
+            )
+        ]
+        return raw_draft, "draft_for_review", default_reason, checks, None
+
+    _report_ticket_step(
+        progress_callback,
+        "Validating draft structure, citations, and privacy",
+    )
+    draft_candidate = validate_generated_draft(raw_draft)
     all_safe_sources = (*eligible_sources, *eligible_related_sources)
     allowed_source_ids = {
         identifier
@@ -599,15 +662,12 @@ def _attempt_draft_generation(
         policy_evaluation,
         allowed_source_ids=allowed_source_ids,
     )
-    draft, route, reason, checks, post_draft_diagnostics = (
-        _evaluate_generated_draft_guardrails(
-            draft_candidate=draft_candidate,
-            all_safe_sources=all_safe_sources,
-            verified_claims=verified_claims,
-            default_reason=default_reason,
-        )
+    return _evaluate_generated_draft_guardrails(
+        draft_candidate=draft_candidate,
+        all_safe_sources=all_safe_sources,
+        verified_claims=verified_claims,
+        default_reason=default_reason,
     )
-    return draft, route, reason, None, duration, checks, post_draft_diagnostics
 
 
 def _evaluate_generated_draft_guardrails(

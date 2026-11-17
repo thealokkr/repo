@@ -69,6 +69,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--label",
         help="Optional run label stored with the run and used to name its output folder",
     )
+    run_parser.add_argument(
+        "--skip-draft",
+        action="store_true",
+        help="Escalate draft-eligible tickets without invoking draft generation",
+    )
+    run_parser.add_argument(
+        "--skip-draft-review",
+        action="store_true",
+        help="Emit generated drafts without in-run review checks (capstone testing only)",
+    )
 
     calibrate_parser = commands.add_parser(
         "calibrate",
@@ -203,6 +213,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             database_path=parsed.database,
             policy_path=parsed.policy,
             label=parsed.label,
+            skip_draft=parsed.skip_draft,
+            skip_draft_review=parsed.skip_draft_review,
             progress_callback=_print_run_progress,
         )
     except Exception as error:

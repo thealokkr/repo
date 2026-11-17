@@ -109,6 +109,8 @@ def run_ticket_batch(
     database_path: Path = DEFAULT_DATABASE_PATH,
     policy_path: Path = DEFAULT_ROUTING_POLICY_CONFIG_PATH,
     label: str | None = None,
+    skip_draft: bool = False,
+    skip_draft_review: bool = False,
     retriever: KnowledgeRetriever | None = None,
     generator: DraftGenerationProvider | None = None,
     progress_callback: Callable[[str, str], None] | None = None,
@@ -348,6 +350,8 @@ def run_ticket_batch(
                 policy_file_fingerprint=policy_file_fingerprint,
                 classifier_implementation_fingerprint=classifier_implementation_fingerprint,
                 generator=draft_generator,
+                skip_draft=skip_draft,
+                skip_draft_review=skip_draft_review,
                 ticket_step_callback=(
                     report_ticket_step if progress_callback is not None else None
                 ),
@@ -648,6 +652,8 @@ def _build_ticket_result(
     policy_file_fingerprint: str,
     classifier_implementation_fingerprint: str,
     generator: DraftGenerationProvider,
+    skip_draft: bool = False,
+    skip_draft_review: bool = False,
     ticket_step_callback: Callable[[str], None] | None = None,
 ) -> tuple[dict[str, Any], str, CanonicalTicket]:
     """Compose one terminal outcome from its completed per-ticket pipeline phases."""
@@ -681,6 +687,8 @@ def _build_ticket_result(
         classifier_implementation_fingerprint=classifier_implementation_fingerprint,
         settings=settings,
         generator=generator,
+        skip_draft=skip_draft,
+        skip_draft_review=skip_draft_review,
         issues=issues,
         duplicate_ticket_id=duplicate,
         progress_callback=ticket_step_callback,

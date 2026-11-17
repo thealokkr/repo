@@ -1493,6 +1493,95 @@ def _install_local_kb_and_grounding_stubs(
     )
 
 
+def test_cli_skip_draft_and_draft_review_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Skip generation or in-run draft review independently through the real CLI."""
+    _install_local_kb_and_grounding_stubs(monkeypatch, tmp_path)
+    input_path = tmp_path / "tickets.json"
+    input_path.write_text(
+        json.dumps(
+            [
+                {
+                    "ticket_id": "T-FLAGS",
+                    "channel": "email",
+                    "subject": "Rotate API keys",
+                    "body": "How do I rotate API keys in the dashboard?",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_root = tmp_path / "outputs"
+    database_path = tmp_path / "runtime.sqlite3"
+    common_args = [
+        "run",
+        "--input",
+        str(input_path),
+        "--output-root",
+        str(output_root),
+        "--database",
+        str(database_path),
+        "--policy",
+        str(TEST_ROUTING_POLICY_PATH),
+    ]
+
+    assert cli.main([*common_args, "--label", "skip-draft", "--skip-draft"]) == 0
+    skip_draft_stdout = capsys.readouterr().out
+    skip_draft_dir = next(output_root.glob("skip-draft_*"))
+    skipped = _read_jsonl(skip_draft_dir / "results.jsonl")[0]
+    assert skipped["predicted_route"] == "escalate"
+    assert skipped["reason"] == (
+        "Draft generation skipped by --skip-draft; human review is required."
+    )
+    assert skipped["draft"] is None
+    assert skipped["generation"]["status"] == "not_attempted"
+    assert skipped["routing"]["matched_rule"] == "draft_generation_skipped"
+    assert "Draft generation skipped by --skip-draft" in skip_draft_stdout
+
+    assert (
+        cli.main(
+            [
+                *common_args,
+                "--label",
+                "skip-draft-review",
+                "--skip-draft-review",
+            ]
+        )
+        == 0
+    )
+    skip_review_stdout = capsys.readouterr().out
+    skip_review_dir = next(output_root.glob("skip-draft-review_*"))
+    unreviewed = _read_jsonl(skip_review_dir / "results.jsonl")[0]
+    assert unreviewed["predicted_route"] == "draft_for_review"
+    assert unreviewed["draft"]["plain_text"]
+    assert unreviewed["generation"]["status"] == "generated"
+    review_checks = {
+        check["check"]: check
+        for check in unreviewed["guardrails"]["checks"]
+        if check["check"]
+        in {
+            "output_structure",
+            "citation_grounding",
+            "private_data_output",
+            "instruction_integrity",
+        }
+    }
+    assert set(review_checks) == {
+        "output_structure",
+        "citation_grounding",
+        "private_data_output",
+        "instruction_integrity",
+    }
+    assert all(check["action"] == "skipped" for check in review_checks.values())
+    assert all("not evaluated" in check["evidence"].casefold() for check in review_checks.values())
+    assert (
+        "Generated-draft review skipped by --skip-draft-review" in skip_review_stdout
+    )
+
+
 def test_cli_labeled_run_uses_output_folder_name_as_run_id_and_preserves_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
