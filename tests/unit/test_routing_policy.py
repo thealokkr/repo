@@ -1324,6 +1324,7 @@ def test_cli_run_routes_protected_low_confidence_and_draft_tickets_to_sqlite_and
 
     run_dirs = list(output_root.iterdir())
     assert len(run_dirs) == 1
+    assert run_dirs[0].name.startswith("routing-policy-e2e_")
     results = [
         json.loads(line)
         for line in (run_dirs[0] / "results.jsonl").read_text(encoding="utf-8").splitlines()
