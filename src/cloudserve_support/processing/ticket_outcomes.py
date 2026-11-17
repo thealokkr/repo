@@ -75,7 +75,6 @@ def build_ticket_outcome(
     progress_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Return the final structured draft, complete handoff, or safe degradation."""
-    _report_ticket_step(progress_callback, "Checking ticket and source safety")
     classification_payload = classification.as_dict()
     retrieval_payload = retrieval.as_dict()
     safety_eval = (
@@ -191,7 +190,23 @@ def build_ticket_outcome(
     post_draft_diagnostics: dict[str, Any] | None = None
     draft_generation_skipped = False
     draft_generation_request_duration_seconds = 0.0
-    _report_ticket_step(progress_callback, "Checking draft eligibility")
+    draft_eligibility_block = None
+    if policy_route != "draft_for_review" or route != "draft_for_review" or error is not None:
+        draft_eligibility_block = f"route: {route}"
+    elif injection_detected:
+        draft_eligibility_block = "prompt-injection guardrail"
+    elif private_input_detected:
+        draft_eligibility_block = "private-data input guardrail"
+    elif private_source_count:
+        draft_eligibility_block = "private-data source guardrail"
+    elif not eligible_sources:
+        draft_eligibility_block = "no eligible source"
+    _report_ticket_step(
+        progress_callback,
+        "Draft eligibility: eligible"
+        if draft_eligibility_block is None
+        else f"Draft eligibility: not eligible ({draft_eligibility_block})",
+    )
     if policy_route == "draft_for_review" and route == "draft_for_review" and error is None:
         if injection_detected:
             _report_ticket_step(
@@ -270,6 +285,12 @@ def build_ticket_outcome(
         _report_ticket_step(
             progress_callback,
             f"Draft generation skipped (route: {route})",
+        )
+
+    if generation["status"] == "not_attempted":
+        _report_ticket_step(
+            progress_callback,
+            "Post-draft checks: not run (no draft generated)",
         )
 
     if not any(check["check"] == "output_structure" for check in guardrail_checks):
@@ -561,6 +582,7 @@ def _attempt_draft_generation(
             skip_review=skip_review,
             progress_callback=progress_callback,
         )
+        _report_post_draft_checks(progress_callback, checks)
         generation["status"] = "generated"
     except DraftGenerationError as generation_error:
         duration = _read_generation_request_duration(generator)
@@ -571,13 +593,15 @@ def _attempt_draft_generation(
             progress_callback,
             "Draft generation or validation failed; degrading ticket",
         )
+        failed_checks = _make_failed_draft_checks(str(generation_error))
+        _report_post_draft_checks(progress_callback, failed_checks)
         return (
             None,
             "degrade",
             "Draft generation failed; the ticket is available for human review.",
             error,
             duration,
-            _make_failed_draft_checks(str(generation_error)),
+            failed_checks,
             None,
         )
     except Exception as unexpected_generation_error:
@@ -592,15 +616,17 @@ def _attempt_draft_generation(
             progress_callback,
             "Draft generation or validation failed; degrading ticket",
         )
+        failed_checks = _make_failed_draft_checks(
+            f"Provider failure type: {type(unexpected_generation_error).__name__}."
+        )
+        _report_post_draft_checks(progress_callback, failed_checks)
         return (
             None,
             "degrade",
             "Draft generation failed; the ticket is available for human review.",
             error,
             duration,
-            _make_failed_draft_checks(
-                f"Provider failure type: {type(unexpected_generation_error).__name__}."
-            ),
+            failed_checks,
             None,
         )
 
@@ -811,6 +837,29 @@ def _report_ticket_step(
         progress_callback(step)
 
 
+def _report_post_draft_checks(
+    progress_callback: Callable[[str], None] | None,
+    checks: Sequence[Mapping[str, Any]],
+) -> None:
+    """Show each post-draft review result without printing draft content."""
+    if progress_callback is None:
+        return
+    progress_callback("Post-draft checks:")
+    for check in checks:
+        action = check.get("action")
+        if action == "skipped":
+            status = "skipped"
+        elif action == "not_applicable":
+            status = "not run"
+        elif check.get("blocked") or not check.get("passed", True):
+            status = "failed"
+        else:
+            status = "passed"
+        name = check.get("check") or "unknown"
+        evidence = check.get("evidence") or ""
+        progress_callback(f"  - {name} [{status}]: {evidence}")
+
+
 _PRE_ROUTING_SAFETY_ROUTING_CHECK_NAMES = frozenset({"protected_rule_check"})
 _PRE_ROUTING_SAFETY_GUARDRAIL_CHECK_NAMES = frozenset(
     {
@@ -978,7 +1027,7 @@ def _report_pre_routing_progress(
     """Emit grouped data and safety pre-routing check lines for CLI progress."""
     if progress_callback is None:
         return
-    progress_callback("Pre-routing checks:")
+    progress_callback("Pre-draft checks:")
     for group_label, group_key in (
         ("Data checks", "data_checks"),
         ("Safety checks", "safety_checks"),

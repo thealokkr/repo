@@ -262,7 +262,7 @@ def run_ticket_batch(
             policy,
             claim_grounding_fn=create_claim_grounding_checker(settings),
         )
-        for ticket_position, prepared_ticket in enumerate(prepared_tickets, start=1):
+        for prepared_ticket in prepared_tickets:
             classification = prepared_ticket.classification
             if classification is None:
                 classification = classification_failure(
@@ -287,28 +287,9 @@ def run_ticket_batch(
             )
             decision = prepared_ticket.decision
             if progress_callback is not None:
-                _report_run_progress(
-                    progress_callback,
-                    f"Ticket {ticket_position}/{len(prepared_tickets)} ({prepared_ticket.ticket.ticket_id!r})",
-                    "ticket",
-                )
-                safety_eval = evaluate_pre_routing_safety(
+                prepared_ticket.pre_routing_safety = evaluate_pre_routing_safety(
                     prepared_ticket.ticket,
                     retrieval,
-                )
-                prepared_ticket.pre_routing_safety = safety_eval
-                pre_routing_checks = build_pre_routing_checks(
-                    routing_checks=policy_evaluation.get("checks", ()),
-                    safety_checks=safety_eval.safety_checks,
-                )
-                _report_pre_routing_progress(
-                    lambda step: _report_run_progress(progress_callback, step, "ticket_step"),
-                    pre_routing_checks,
-                )
-                _report_run_progress(
-                    progress_callback,
-                    f"Routing decision: {decision.route} ({decision.matched_rule})",
-                    "ticket_step",
                 )
             used_gemini_grounding = _routing_used_gemini_grounding(
                 policy_evaluation,
@@ -341,6 +322,20 @@ def run_ticket_batch(
                 f"Ticket {ticket_position}/{len(prepared_tickets)} ({ticket.ticket_id!r})",
                 "ticket",
             )
+            if progress_callback is not None:
+                policy_evaluation = prepared_ticket.policy_evaluation
+                decision = prepared_ticket.decision
+                safety_eval = prepared_ticket.pre_routing_safety
+                if policy_evaluation is None or decision is None or safety_eval is None:
+                    raise RuntimeError("Ticket pre-draft checks were not fully resolved.")
+                pre_routing_checks = build_pre_routing_checks(
+                    routing_checks=policy_evaluation.get("checks", ()),
+                    safety_checks=safety_eval.safety_checks,
+                )
+                _report_pre_routing_progress(report_ticket_step, pre_routing_checks)
+                report_ticket_step(
+                    f"Routing decision: {decision.route} ({decision.matched_rule})"
+                )
             ticket_started = time.perf_counter()
             result, storage_ticket_id, ticket = _build_ticket_result(
                 prepared_ticket,

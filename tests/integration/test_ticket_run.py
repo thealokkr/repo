@@ -1414,6 +1414,7 @@ def test_grouped_pre_routing_checks_across_sqlite_exports_and_cli_progress(
     assert report_by_id["T-PROTECTED"]["before_drafting"]["pre_routing_checks"] == protected_sqlite
     assert sqlite_by_id["T-PROTECTED"]["route"] == "escalate"
     assert sqlite_by_id["T-PROTECTED"]["generation"]["status"] == "not_attempted"
+    assert sqlite_by_id["T-ELIGIBLE"]["generation"]["status"] == "generated"
 
     protected_rule = next(
         c for c in protected_sqlite["safety_checks"] if c["name"] == "protected_rule_check"
@@ -1437,12 +1438,59 @@ def test_grouped_pre_routing_checks_across_sqlite_exports_and_cli_progress(
             assert check["name"] in rendered
             assert check["status"] in rendered
             assert check["reason"] in rendered
-    assert (
-        stdout.index("Pre-routing checks:")
-        < stdout.index("Routing decision:")
-        < stdout.index("Routing done.")
-        < stdout.index("Ticket processing in progress...")
+    assert "Pre-draft checks:" in stdout
+    assert "Pre-routing checks:" in markdown
+    post_draft_checks = {
+        check["check"]: check
+        for check in sqlite_by_id["T-ELIGIBLE"]["guardrails"]["checks"]
+        if check["check"]
+        in {
+            "output_structure",
+            "citation_grounding",
+            "private_data_output",
+            "instruction_integrity",
+        }
+    }
+    assert set(post_draft_checks) == {
+        "output_structure",
+        "citation_grounding",
+        "private_data_output",
+        "instruction_integrity",
+    }
+    for check_name, check in post_draft_checks.items():
+        status = "failed" if check["blocked"] or not check["passed"] else "passed"
+        assert f"{check_name} [{status}]" in stdout
+    assert "Post-draft checks: not run (no draft generated)" in stdout
+    ordered_progress = (
+        "Routing in progress...",
+        "Routing done.",
+        "Ticket processing in progress...",
+        "Ticket 1/2 ('T-ELIGIBLE'):",
+        "Pre-draft checks:",
+        "Data checks:",
+        "Safety checks:",
+        "Routing decision:",
+        "Draft eligibility: eligible",
+        "Generating draft",
+        "Post-draft checks:",
+        "Persisting audit events and ticket status",
+        "Ticket result persisted",
+        "Ticket 2/2 ('T-PROTECTED'):",
+        "Pre-draft checks:",
+        "Routing decision:",
+        "Draft eligibility: not eligible (route: escalate)",
+        "Draft generation skipped (route: escalate)",
+        "Post-draft checks: not run (no draft generated)",
+        "Building and sanitizing human handoff",
+        "Finalizing ticket outcome",
+        "Persisting audit events and ticket status",
+        "Ticket result persisted",
+        "Ticket processing done.",
     )
+    cursor = 0
+    for stage in ordered_progress:
+        position = stdout.index(stage, cursor)
+        cursor = position + len(stage)
 
     # AC-3: evaluation-only labels/history never leak into pre_routing_checks or operational payloads
     operational_json = json.dumps(
@@ -1540,6 +1588,7 @@ def test_cli_skip_draft_and_draft_review_flags(
     assert skipped["generation"]["status"] == "not_attempted"
     assert skipped["routing"]["matched_rule"] == "draft_generation_skipped"
     assert "Draft generation skipped by --skip-draft" in skip_draft_stdout
+    assert "Post-draft checks: not run (no draft generated)" in skip_draft_stdout
 
     assert (
         cli.main(
@@ -1580,6 +1629,8 @@ def test_cli_skip_draft_and_draft_review_flags(
     assert (
         "Generated-draft review skipped by --skip-draft-review" in skip_review_stdout
     )
+    assert "Post-draft checks:" in skip_review_stdout
+    assert "output_structure [skipped]" in skip_review_stdout
 
 
 def test_cli_labeled_run_uses_output_folder_name_as_run_id_and_preserves_history(

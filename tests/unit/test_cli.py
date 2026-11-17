@@ -37,12 +37,28 @@ def test_run_prints_stage_progress_output_folder_and_metrics_table(
         progress_callback = kwargs["progress_callback"]
         progress_callback("Classification", "in_progress")
         progress_callback("Classification", "done")
+        progress_callback("Routing", "in_progress")
+        progress_callback("Routing", "done")
         progress_callback("Ticket processing", "in_progress")
         progress_callback("Ticket 1/2 ('DEV-0001')", "ticket")
-        progress_callback("Checking ticket and source safety", "ticket_step")
+        progress_callback("Pre-draft checks:", "ticket_step")
+        progress_callback("  - Data checks:", "ticket_step")
+        progress_callback(
+            "    - classification_confidence_check [passed]: confidence is sufficient",
+            "ticket_step",
+        )
+        progress_callback("Routing decision: draft_for_review (eligible)", "ticket_step")
+        progress_callback("Draft eligibility: eligible", "ticket_step")
+        progress_callback("Generating draft", "ticket_step")
+        progress_callback("Post-draft checks:", "ticket_step")
+        progress_callback(
+            "  - citation_grounding [passed]: claims are source-grounded",
+            "ticket_step",
+        )
+        progress_callback("Ticket result persisted", "ticket_step")
         progress_callback("", "ticket_separator")
         progress_callback("Ticket 2/2 ('DEV-0002')", "ticket")
-        progress_callback("Generating draft", "ticket_step")
+        progress_callback("Draft generation skipped (route: escalate)", "ticket_step")
         progress_callback("", "ticket_separator")
         progress_callback("Ticket processing", "done")
         return "run-123", output_directory, {"internal_metric_dump": "hidden"}
@@ -65,11 +81,21 @@ def test_run_prints_stage_progress_output_folder_and_metrics_table(
     assert "Classification in progress..." in output
     assert "Classification done." in output
     assert (
+        "Routing in progress...\n"
+        "Routing done.\n"
         "Ticket processing in progress...\n"
         "Ticket 1/2 ('DEV-0001'):\n"
-        "  - Checking ticket and source safety\n\n"
+        "  - Pre-draft checks:\n"
+        "    - Data checks:\n"
+        "      - classification_confidence_check [passed]: confidence is sufficient\n"
+        "  - Routing decision: draft_for_review (eligible)\n"
+        "  - Draft eligibility: eligible\n"
+        "  - Generating draft\n"
+        "  - Post-draft checks:\n"
+        "    - citation_grounding [passed]: claims are source-grounded\n"
+        "  - Ticket result persisted\n\n"
         "Ticket 2/2 ('DEV-0002'):\n"
-        "  - Generating draft\n\n"
+        "  - Draft generation skipped (route: escalate)\n\n"
         "Ticket processing done."
     ) in output
     assert f"Output folder: {output_directory}" in output
