@@ -11,6 +11,8 @@ from jsonschema import Draft202012Validator
 from cloudserve_support.classification.ticket_classification import INTENT_VALUES
 
 OUTPUT_SCHEMA_DIRECTORY = Path(__file__).resolve().parents[3] / "schemas" / "outputs"
+# Accept legacy 32-char hex UUIDs and filename-safe output-folder basenames without separators or whitespace.
+RUN_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
 INTENT_SCHEMA = {"enum": sorted(INTENT_VALUES)}
 URGENCY_SCHEMA = {"enum": ["high", "medium", "low", "unknown"]}
 EXPECTED_ROUTE_SCHEMA = {"enum": ["auto_respond", "draft_for_review", "escalate", "degrade"]}
@@ -328,7 +330,7 @@ QUALITY_JUDGE_SCORECARD_SCHEMA = {
     "properties": {
         "status": {"enum": ["complete", "incomplete"]},
         "label": {"type": "string", "minLength": 1},
-        "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "run_id": {"type": "string", "pattern": RUN_ID_PATTERN},
         "source_set": {"enum": ["development", "validation", "external"]},
         "judge_model": {"type": "string", "minLength": 1},
         "rubric_version": {"type": "string", "minLength": 1},
@@ -388,7 +390,7 @@ QUALITY_JUDGMENT_SCHEMA = {
         "unsupported_factual_claims", "error",
     ],
     "properties": {
-        "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "run_id": {"type": "string", "pattern": RUN_ID_PATTERN},
         "ticket_id": {"type": "string", "minLength": 1},
         "input_index": {"type": ["integer", "null"], "minimum": 0},
         "sample_index": {"type": "integer", "minimum": 0, "maximum": 19},
@@ -499,7 +501,7 @@ EVALUATION_REPORT_SCHEMA = {
     ],
     "properties": {
         "report_version": {"const": 1},
-        "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "run_id": {"type": "string", "pattern": RUN_ID_PATTERN},
         "source_set": {"enum": ["development", "validation", "external"]},
         "input_ref": {"type": "string", "minLength": 1},
         "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -829,6 +831,21 @@ GUARDRAILS_SCHEMA = {
         }
     },
 }
+PRE_ROUTING_CHECKS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["data_checks", "safety_checks"],
+    "properties": {
+        "data_checks": {
+            "type": "array",
+            "items": {"type": "object"},
+        },
+        "safety_checks": {
+            "type": "array",
+            "items": {"type": "object"},
+        },
+    },
+}
 GENERATION_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -862,7 +879,7 @@ OUTPUT_SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
             "processing_latency_seconds",
         ],
         "properties": {
-            "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+            "run_id": {"type": "string", "pattern": RUN_ID_PATTERN},
             "input_index": {"type": "integer", "minimum": 0},
             "ticket_id": {"type": ["string", "null"], "minLength": 1},
             "channel": {"type": ["string", "null"], "minLength": 1},
@@ -903,6 +920,7 @@ OUTPUT_SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
             "draft": {"oneOf": [DRAFT_SCHEMA, {"type": "null"}]},
             "handoff": {"oneOf": [HANDOFF_SCHEMA, {"type": "null"}]},
             "guardrails": GUARDRAILS_SCHEMA,
+            "pre_routing_checks": PRE_ROUTING_CHECKS_SCHEMA,
             "generation": GENERATION_SCHEMA,
             "processing_duration_seconds": {"type": "number", "minimum": 0},
             "draft_generation_request_duration_seconds": {"type": "number", "minimum": 0},
@@ -1025,7 +1043,7 @@ OUTPUT_SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
         ],
         "properties": {
             "event_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
-            "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+            "run_id": {"type": "string", "pattern": RUN_ID_PATTERN},
             "ticket_occurrence_id": {"type": "string", "minLength": 1},
             "input_index": {"type": "integer", "minimum": 0},
             "ticket_id": {"type": "string", "minLength": 1},
@@ -1082,7 +1100,7 @@ OUTPUT_SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
         "additionalProperties": False,
         "required": ["run_id", "total_count", "completed_count", "failed_count", "exception_count", "route_counts", "batch_export_duration_seconds", "evaluation"],
         "properties": {
-            "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+            "run_id": {"type": "string", "pattern": RUN_ID_PATTERN},
             "total_count": {"type": "integer", "minimum": 0},
             "completed_count": {"type": "integer", "minimum": 0},
             "failed_count": {"type": "integer", "minimum": 0},
@@ -1113,7 +1131,7 @@ OUTPUT_SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
         "additionalProperties": False,
         "required": ["run_id", "input_index", "ticket_id", "occurred_at", "error_code", "message"],
         "properties": {
-            "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+            "run_id": {"type": "string", "pattern": RUN_ID_PATTERN},
             "input_index": {"type": "integer", "minimum": 0},
             "ticket_id": {"type": "string", "minLength": 1},
             "occurred_at": {"type": "string", "format": "date-time"},

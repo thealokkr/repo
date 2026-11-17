@@ -41,7 +41,7 @@
   "properties": {
     "run_id": {
       "type": "string",
-      "pattern": "^[0-9a-f]{32}$"
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
     },
     "input_index": {
       "type": "integer",
@@ -1011,6 +1011,28 @@
                 "minLength": 1
               }
             }
+          }
+        }
+      }
+    },
+    "pre_routing_checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "data_checks",
+        "safety_checks"
+      ],
+      "properties": {
+        "data_checks": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "safety_checks": {
+          "type": "array",
+          "items": {
+            "type": "object"
           }
         }
       }

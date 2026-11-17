@@ -225,7 +225,10 @@ def _print_run_progress(stage: str, status: str) -> None:
     if status == "ticket":
         print(f"{stage}:", flush=True)
     elif status == "ticket_step":
-        print(f"  - {stage}", flush=True)
+        if stage.startswith("  "):
+            print(f"  {stage}", flush=True)
+        else:
+            print(f"  - {stage}", flush=True)
     elif status == "ticket_separator":
         print(flush=True)
     else:

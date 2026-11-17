@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 import json
 import re
 import shutil
@@ -33,7 +33,15 @@ from cloudserve_support.knowledge.retrieval import (
     KnowledgeRetriever,
     RetrievalResult,
 )
-from cloudserve_support.persistence.runtime_database import initialize_runtime_database
+from cloudserve_support.persistence.runtime_database import (
+    connect_runtime_database,
+    create_audit_event_record,
+    create_processing_run,
+    create_ticket_run_record,
+    initialize_runtime_database,
+    update_processing_run_status,
+    update_ticket_run_status,
+)
 from cloudserve_support.processing import run_tickets as run_tickets_module
 from cloudserve_support.processing.run_tickets import run_ticket_batch
 from cloudserve_support.reporting.output_schemas import (
@@ -265,7 +273,9 @@ def test_one_ticket_run_persists_audit_isolates_labels_and_exports_schemas(
     assert len(results) == 1
     assert exceptions == []
     assert failure_report["run"]["kpi_failed_record_count"] == 1
-    assert failure_report["failed_records"][0]["failed_kpis"] == ["intent"]
+    assert "failed_records" not in failure_report
+    assert failure_report["tickets"][0]["failed_kpis"] == ["intent"]
+    assert "failed_kpis" not in failure_report["tickets"][0]["evaluation"]
 
     result = results[0]
     assert result["ticket_id"] == "DEV-0001"
@@ -1260,3 +1270,507 @@ def test_runtime_schema_migration_preserves_rows_and_schema_initializer_refuses_
     schema_path.write_text("{}\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="contract differs"):
         initialize_output_schemas(schema_directory)
+
+
+def test_grouped_pre_routing_checks_across_sqlite_exports_and_cli_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC-1, AC-2, AC-3: Grouped pre_routing_checks match across SQLite, exports, Markdown, and CLI."""
+    _install_decisions_api_mock(
+        monkeypatch,
+        lambda ticket: (
+            ("security_incident", "high")
+            if "Security" in ticket.get("subject", "")
+            else ("api_key_issue", "medium")
+        ),
+    )
+    retriever = _isolated_retriever(
+        tmp_path,
+        query_doc_map={"Rotate API keys": "DOC-API-001"},
+        default_doc_id="DOC-API-001",
+    )
+    monkeypatch.setattr(run_tickets_module, "KnowledgeRetriever", lambda *a, **kw: retriever)
+    monkeypatch.setattr(
+        run_tickets_module,
+        "create_claim_grounding_checker",
+        lambda _settings: (
+            lambda *, ticket, sources, related_sources: {
+                "claims": [
+                    {
+                        "text": (
+                            "They give the limit, the remaining allowance and the reset time, "
+                            "which is more reliable than inferring the limit from behaviour."
+                        ),
+                        "source_ids": [sources[0]["passage_id"]],
+                    }
+                ],
+                "unsupported_points": [],
+                "conflicting_points": [],
+                "confidence": 0.96,
+                "reason": "Primary KB passage supports rotating API keys.",
+            }
+        ),
+    )
+
+    tickets = [
+        {
+            "ticket_id": "T-ELIGIBLE",
+            "channel": "email",
+            "subject": "Rotate API keys",
+            "body": "How do I rotate API keys in the dashboard?",
+            "history": ["SENTINEL_EVAL_HISTORY_ONLY"],
+            "labels": {
+                "intent": "api_key_issue",
+                "urgency": "low",
+                "expected_route": "draft_for_review",
+                "answerable_from_docs": True,
+                "expected_doc_ids": ["DOC-API-001"],
+                "must_not_auto_respond": False,
+                "note": "SENTINEL_LABEL_DO_NOT_LEAK",
+            },
+        },
+        {
+            "ticket_id": "T-PROTECTED",
+            "channel": "chat",
+            "subject": "Security incident",
+            "body": "Unauthorized user accessed our workspace.",
+        },
+    ]
+    input_path = tmp_path / "tickets.json"
+    input_path.write_text(json.dumps(tickets), encoding="utf-8")
+    output_root = tmp_path / "outputs"
+    database_path = tmp_path / "runtime.sqlite3"
+
+    exit_code = cli.main(
+        [
+            "run",
+            "--input",
+            str(input_path),
+            "--output-root",
+            str(output_root),
+            "--database",
+            str(database_path),
+            "--policy",
+            str(TEST_ROUTING_POLICY_PATH),
+        ]
+    )
+    assert exit_code == 0
+    stdout = capsys.readouterr().out
+
+    run_dirs = [p for p in output_root.iterdir() if p.is_dir()]
+    assert len(run_dirs) == 1
+    output_dir = run_dirs[0]
+
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT event_type, event_payload_json FROM audit_events WHERE event_type IN ('ticket_completed', 'ticket_failed')"
+        ).fetchall()
+    sqlite_by_id = {
+        json.loads(row[1])["ticket_id"]: json.loads(row[1])["result"] for row in rows
+    }
+    decision_by_id = {
+        item["ticket_id"]: item["result"]
+        for item in _read_jsonl(output_dir / "decision_log.jsonl")
+        if item.get("terminal")
+    }
+    results_by_id = {item["ticket_id"]: item for item in _read_jsonl(output_dir / "results.jsonl")}
+    failure_report = json.loads((output_dir / "failure_report.json").read_text(encoding="utf-8"))
+    report_by_id = {item["ticket_id"]: item for item in failure_report["tickets"]}
+    markdown = (output_dir / "failure_report.md").read_text(encoding="utf-8")
+
+    # AC-1: eligible ticket appears in all surfaces with identical grouped checks
+    eligible_sqlite = sqlite_by_id["T-ELIGIBLE"]["pre_routing_checks"]
+    assert decision_by_id["T-ELIGIBLE"]["pre_routing_checks"] == eligible_sqlite
+    assert results_by_id["T-ELIGIBLE"]["pre_routing_checks"] == eligible_sqlite
+    assert report_by_id["T-ELIGIBLE"]["before_drafting"]["pre_routing_checks"] == eligible_sqlite
+    assert report_by_id["T-ELIGIBLE"]["stopped_at"] == "evaluation_only"
+    assert report_by_id["T-ELIGIBLE"]["failed_kpis"] == [
+        "urgency",
+        "expected_doc_ids",
+    ]
+    assert "failed_kpis" not in report_by_id["T-ELIGIBLE"]["evaluation"]
+
+    assert [c["name"] for c in eligible_sqlite["data_checks"]] == [
+        "classification_confidence_check",
+        "source_presence_check",
+        "claim_grounding_check",
+    ]
+    assert all(c["status"] == "passed" and c["reason"] for c in eligible_sqlite["data_checks"])
+    assert [c["name"] for c in eligible_sqlite["safety_checks"]] == [
+        "protected_rule_check",
+        "source_eligibility",
+        "prompt_injection",
+        "private_data_input",
+        "private_data_source",
+    ]
+    assert all(c["status"] == "passed" and c["reason"] for c in eligible_sqlite["safety_checks"])
+
+    # AC-2: protected ticket records failed safety check + skipped downstream data checks
+    protected_sqlite = sqlite_by_id["T-PROTECTED"]["pre_routing_checks"]
+    assert decision_by_id["T-PROTECTED"]["pre_routing_checks"] == protected_sqlite
+    assert results_by_id["T-PROTECTED"]["pre_routing_checks"] == protected_sqlite
+    assert report_by_id["T-PROTECTED"]["before_drafting"]["pre_routing_checks"] == protected_sqlite
+    assert sqlite_by_id["T-PROTECTED"]["route"] == "escalate"
+    assert sqlite_by_id["T-PROTECTED"]["generation"]["status"] == "not_attempted"
+
+    protected_rule = next(
+        c for c in protected_sqlite["safety_checks"] if c["name"] == "protected_rule_check"
+    )
+    assert protected_rule["status"] == "failed"
+    assert protected_rule["reason"]
+    for skipped_check in protected_sqlite["data_checks"]:
+        assert skipped_check["status"] == "skipped"
+        assert "protected_rule_check" in skipped_check["reason"]
+
+    # CLI progress and failure_report.md show both group headings plus names, statuses, and reasons
+    for rendered in (stdout, markdown):
+        assert "Data checks:" in rendered
+        assert "Safety checks:" in rendered
+        for check in (
+            *eligible_sqlite["data_checks"],
+            *eligible_sqlite["safety_checks"],
+            *protected_sqlite["data_checks"],
+            *protected_sqlite["safety_checks"],
+        ):
+            assert check["name"] in rendered
+            assert check["status"] in rendered
+            assert check["reason"] in rendered
+    assert (
+        stdout.index("Pre-routing checks:")
+        < stdout.index("Routing decision:")
+        < stdout.index("Routing done.")
+        < stdout.index("Ticket processing in progress...")
+    )
+
+    # AC-3: evaluation-only labels/history never leak into pre_routing_checks or operational payloads
+    operational_json = json.dumps(
+        {
+            "sqlite": sqlite_by_id,
+            "decisions": decision_by_id,
+        }
+    )
+    assert "SENTINEL_EVAL_HISTORY_ONLY" not in operational_json
+    assert "SENTINEL_LABEL_DO_NOT_LEAK" not in operational_json
+
+
+def _install_local_kb_and_grounding_stubs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Point KnowledgeRetriever at a real local Chroma index and stub external LLM grounding."""
+    _install_decisions_api_mock(
+        monkeypatch,
+        lambda _ticket: ("api_key_issue", "low"),
+    )
+    retriever = _isolated_retriever(
+        tmp_path,
+        query_doc_map={"Rotate API keys": "DOC-API-001"},
+        default_doc_id="DOC-API-001",
+    )
+    monkeypatch.setattr(run_tickets_module, "KnowledgeRetriever", lambda *a, **kw: retriever)
+    monkeypatch.setattr(
+        run_tickets_module,
+        "create_claim_grounding_checker",
+        lambda _settings: (
+            lambda *, ticket, sources, related_sources: {
+                "claims": [
+                    {
+                        "text": (
+                            "They give the limit, the remaining allowance and the reset time, "
+                            "which is more reliable than inferring the limit from behaviour."
+                        ),
+                        "source_ids": [sources[0]["passage_id"]],
+                    }
+                ],
+                "unsupported_points": [],
+                "conflicting_points": [],
+                "confidence": 0.96,
+                "reason": "Primary KB passage supports rotating API keys.",
+            }
+        ),
+    )
+
+
+def test_cli_labeled_run_uses_output_folder_name_as_run_id_and_preserves_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Labeled CLI runs use the output folder basename as run_id across SQLite and all exports."""
+    _install_local_kb_and_grounding_stubs(monkeypatch, tmp_path)
+    database_path = tmp_path / "runtime.sqlite3"
+    initialize_runtime_database(database_path)
+
+    historical_run_id = "a1b2c3d4" * 4
+    historical_connection = connect_runtime_database(database_path)
+    try:
+        historical_connection.execute("BEGIN IMMEDIATE")
+        create_processing_run(
+            historical_connection,
+            run_id=historical_run_id,
+            input_ref="data/tickets/old.json",
+            started_at="2026-11-10T08:00:00Z",
+            label="legacy batch",
+            output_dir=f"outputs/{historical_run_id}",
+        )
+        create_ticket_run_record(
+            historical_connection,
+            run_id=historical_run_id,
+            storage_ticket_id="OLD-001",
+            channel="email",
+            received_at="2026-11-10T07:59:00Z",
+            customer_tier="pro",
+            language_fluency="fluent",
+            context={"subject": "Old ticket", "body": "Legacy body"},
+            input_labels_json=None,
+        )
+        create_audit_event_record(
+            historical_connection,
+            event_id="e1" * 16,
+            run_id=historical_run_id,
+            storage_ticket_id="OLD-001",
+            occurred_at="2026-11-10T08:00:01Z",
+            event_type="ticket_completed",
+            action_taken="escalate",
+            reason="Historical record",
+            result_payload={"ticket_id": "OLD-001", "result": {"run_id": historical_run_id}},
+        )
+        update_ticket_run_status(
+            historical_connection,
+            run_id=historical_run_id,
+            storage_ticket_id="OLD-001",
+            processing_status="completed",
+            error_code=None,
+            error_message=None,
+        )
+        update_processing_run_status(
+            historical_connection,
+            run_id=historical_run_id,
+            completed_at="2026-11-10T08:00:02Z",
+            status="completed",
+        )
+        historical_connection.commit()
+
+        before_runs = [
+            tuple(row)
+            for row in historical_connection.execute(
+                "SELECT * FROM processing_runs WHERE run_id = ?", (historical_run_id,)
+            ).fetchall()
+        ]
+        before_tickets = [
+            tuple(row)
+            for row in historical_connection.execute(
+                "SELECT * FROM ticket_runs WHERE run_id = ?", (historical_run_id,)
+            ).fetchall()
+        ]
+        before_events = [
+            tuple(row)
+            for row in historical_connection.execute(
+                "SELECT * FROM audit_events WHERE run_id = ?", (historical_run_id,)
+            ).fetchall()
+        ]
+    finally:
+        historical_connection.close()
+
+    tickets = [
+        {
+            "ticket_id": "T-VALID",
+            "channel": "email",
+            "subject": "Rotate API keys",
+            "body": "How do I rotate API keys in the dashboard?",
+        },
+        {
+            "ticket_id": "T-MALFORMED",
+            "channel": "fax",
+            "subject": "Unsupported channel",
+            "body": "This record should produce an exception.",
+        },
+    ]
+    input_path = tmp_path / "tickets.json"
+    input_path.write_text(json.dumps(tickets), encoding="utf-8")
+    output_root = tmp_path / "outputs"
+
+    exit_code = cli.main(
+        [
+            "run",
+            "--input",
+            str(input_path),
+            "--output-root",
+            str(output_root),
+            "--database",
+            str(database_path),
+            "--policy",
+            str(TEST_ROUTING_POLICY_PATH),
+            "--label",
+            "single ticket",
+        ]
+    )
+    assert exit_code == 0
+    stdout = capsys.readouterr().out
+
+    run_dirs = [p for p in output_root.iterdir() if p.is_dir()]
+    assert len(run_dirs) == 1
+    output_dir = run_dirs[0]
+    expected_run_id = output_dir.name
+    assert expected_run_id.startswith("single-ticket_")
+    assert f"Output folder: {output_dir}" in stdout
+    assert f"- Run ID: `{expected_run_id}`" in stdout
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT * FROM processing_runs WHERE run_id = ?", (historical_run_id,)
+        ).fetchall() == before_runs
+        assert connection.execute(
+            "SELECT * FROM ticket_runs WHERE run_id = ?", (historical_run_id,)
+        ).fetchall() == before_tickets
+        assert connection.execute(
+            "SELECT * FROM audit_events WHERE run_id = ?", (historical_run_id,)
+        ).fetchall() == before_events
+
+        new_run = connection.execute(
+            "SELECT run_id, label, output_dir FROM processing_runs WHERE run_id = ?",
+            (expected_run_id,),
+        ).fetchone()
+        assert new_run is not None
+        assert new_run[0] == expected_run_id
+        assert new_run[1] == "single ticket"
+        assert Path(new_run[2]).name == expected_run_id
+
+        ticket_run_ids = connection.execute(
+            "SELECT DISTINCT run_id FROM ticket_runs WHERE run_id != ?",
+            (historical_run_id,),
+        ).fetchall()
+        assert ticket_run_ids == [(expected_run_id,)]
+        audit_run_ids = connection.execute(
+            "SELECT DISTINCT run_id FROM audit_events WHERE run_id != ?",
+            (historical_run_id,),
+        ).fetchall()
+        assert audit_run_ids == [(expected_run_id,)]
+
+    results = _read_jsonl(output_dir / "results.jsonl")
+    assert len(results) == 2
+    assert all(row["run_id"] == expected_run_id for row in results)
+
+    decisions = _read_jsonl(output_dir / "decision_log.jsonl")
+    assert len(decisions) >= 2
+    assert all(event["run_id"] == expected_run_id for event in decisions)
+
+    exceptions = _read_jsonl(output_dir / "exceptions.jsonl")
+    assert len(exceptions) == 1
+    assert exceptions[0]["run_id"] == expected_run_id
+
+    metrics = json.loads((output_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["run_id"] == expected_run_id
+
+    failure_report = json.loads((output_dir / "failure_report.json").read_text(encoding="utf-8"))
+    assert failure_report["run"]["run_id"] == expected_run_id
+
+    metrics_md = (output_dir / "metrics.md").read_text(encoding="utf-8")
+    assert f"- Run ID: `{expected_run_id}`" in metrics_md
+
+    failure_report_md = (output_dir / "failure_report.md").read_text(encoding="utf-8")
+    assert f"- Run: `{expected_run_id}`" in failure_report_md
+
+
+def test_cli_unlabeled_and_same_minute_label_collision_run_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlabeled runs keep UUID run IDs and same-minute label collisions disambiguate cleanly."""
+    _install_local_kb_and_grounding_stubs(monkeypatch, tmp_path)
+
+    fixed_now = datetime(2026, 11, 17, 9, 13, 0, tzinfo=timezone.utc)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return fixed_now if tz is None else fixed_now.astimezone(tz)
+
+    monkeypatch.setattr(run_tickets_module, "datetime", FixedDateTime)
+
+    tickets = [
+        {
+            "ticket_id": "T-1",
+            "channel": "email",
+            "subject": "Rotate API keys",
+            "body": "How do I rotate API keys in the dashboard?",
+        }
+    ]
+    input_path = tmp_path / "tickets.json"
+    input_path.write_text(json.dumps(tickets), encoding="utf-8")
+    output_root = tmp_path / "outputs"
+    database_path = tmp_path / "runtime.sqlite3"
+
+    # Unlabeled run retains 32-char hex UUID equal to its folder name
+    assert (
+        cli.main(
+            [
+                "run",
+                "--input",
+                str(input_path),
+                "--output-root",
+                str(output_root),
+                "--database",
+                str(database_path),
+                "--policy",
+                str(TEST_ROUTING_POLICY_PATH),
+            ]
+        )
+        == 0
+    )
+    unlabeled_dirs = [p for p in output_root.iterdir() if p.is_dir()]
+    assert len(unlabeled_dirs) == 1
+    uuid_run_id = unlabeled_dirs[0].name
+    assert re.fullmatch(r"[0-9a-f]{32}", uuid_run_id)
+    assert json.loads((unlabeled_dirs[0] / "metrics.json").read_text(encoding="utf-8"))["run_id"] == uuid_run_id
+
+    # Two labeled runs in the same UTC minute receive distinct folder-derived run_ids
+    for _ in range(2):
+        assert (
+            cli.main(
+                [
+                    "run",
+                    "--input",
+                    str(input_path),
+                    "--output-root",
+                    str(output_root),
+                    "--database",
+                    str(database_path),
+                    "--policy",
+                    str(TEST_ROUTING_POLICY_PATH),
+                    "--label",
+                    "single-ticket",
+                ]
+            )
+            == 0
+        )
+
+    expected_first = "single-ticket_2026-11-17_09-13"
+    expected_second = "single-ticket_2026-11-17_09-13_2"
+    assert (output_root / expected_first / "metrics.json").exists()
+    assert (output_root / expected_second / "metrics.json").exists()
+    assert json.loads((output_root / expected_first / "metrics.json").read_text(encoding="utf-8"))["run_id"] == expected_first
+    assert json.loads((output_root / expected_second / "metrics.json").read_text(encoding="utf-8"))["run_id"] == expected_second
+
+    with sqlite3.connect(database_path) as connection:
+        runs = connection.execute(
+            "SELECT run_id, label, output_dir FROM processing_runs ORDER BY rowid ASC"
+        ).fetchall()
+        assert [(row[0], row[1], Path(row[2]).name) for row in runs] == [
+            (uuid_run_id, None, uuid_run_id),
+            (expected_first, "single-ticket", expected_first),
+            (expected_second, "single-ticket", expected_second),
+        ]
+        for run_id in (uuid_run_id, expected_first, expected_second):
+            ticket_rows = connection.execute(
+                "SELECT run_id, ticket_id FROM ticket_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchall()
+            assert ticket_rows == [(run_id, "T-1")]
+            event_run_ids = connection.execute(
+                "SELECT DISTINCT run_id FROM audit_events WHERE run_id = ?",
+                (run_id,),
+            ).fetchall()
+            assert event_run_ids == [(run_id,)]

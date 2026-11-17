@@ -18,6 +18,7 @@ from cloudserve_support.persistence.runtime_database import (
     read_run_audit_events,
     read_run_ticket_ids,
 )
+from cloudserve_support.processing.ticket_outcomes import build_pre_routing_checks
 from cloudserve_support.evaluation.run_metrics import evaluate_completed_run
 from cloudserve_support.reporting.output_schemas import (
     load_output_schemas,
@@ -352,6 +353,8 @@ def _project_diagnostic_result(
         else None
     )
     row["guardrails"] = result["guardrails"]
+    if "pre_routing_checks" in result:
+        row["pre_routing_checks"] = result["pre_routing_checks"]
     row["generation"] = result["generation"]
     row["processing_duration_seconds"] = result["processing_duration_seconds"]
     row["draft_generation_request_duration_seconds"] = result[
@@ -390,24 +393,22 @@ def _build_failure_report(
         terminal_events=terminal_events,
         label_comparisons=label_comparisons,
     )
-    failed_records: list[dict[str, Any]] = []
+    kpi_failed_record_count = 0
     tickets: list[dict[str, Any]] = []
     operational_failure_count = 0
 
     for result in results:
         comparison = label_comparisons[result["input_index"]]
-        evaluation = _build_ticket_evaluation_summary(result, comparison=comparison)
-        if evaluation["failed_kpis"]:
-            failed_records.append(
-                {
-                    "input_index": result["input_index"],
-                    "ticket_id": result["ticket_id"],
-                    "failed_kpis": evaluation["failed_kpis"],
-                }
-            )
+        evaluation, failed_kpis = _build_ticket_evaluation_summary(
+            result,
+            comparison=comparison,
+        )
+        if failed_kpis:
+            kpi_failed_record_count += 1
         ticket_entry, is_operational_failure = _build_failure_report_ticket(
             result,
             evaluation=evaluation,
+            failed_kpis=failed_kpis,
         )
         if is_operational_failure:
             operational_failure_count += 1
@@ -436,11 +437,10 @@ def _build_failure_report(
             "degraded": route_counts["degrade"],
             "blocked_by_guardrails": blocked_by_guardrails,
             "operational_failure_count": operational_failure_count,
-            "kpi_failed_record_count": len(failed_records),
+            "kpi_failed_record_count": kpi_failed_record_count,
             "reported_ticket_count": len(tickets),
         },
         "metrics": metrics_summary,
-        "failed_records": failed_records,
         "tickets": tickets,
     }
 
@@ -501,7 +501,7 @@ def _build_ticket_evaluation_summary(
     result: dict[str, Any],
     *,
     comparison: dict[str, Any],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], list[str]]:
     """Compare persisted expected labels against generated predictions for one ticket."""
     provided = comparison["provided_labels"] or {}
     generated = comparison["generated_labels"]
@@ -566,12 +566,14 @@ def _build_ticket_evaluation_summary(
         draft_emitted=isinstance(result.get("draft"), dict),
         failed_kpis=failed_kpis,
     )
-    return {
-        "expected": expected,
-        "predicted": predicted,
-        "failed_kpis": failed_kpis,
-        "expected_doc_note": expected_doc_note,
-    }
+    return (
+        {
+            "expected": expected,
+            "predicted": predicted,
+            "expected_doc_note": expected_doc_note,
+        },
+        failed_kpis,
+    )
 
 
 def _extract_cited_doc_ids(
@@ -656,6 +658,7 @@ def _build_failure_report_ticket(
     result: dict[str, Any],
     *,
     evaluation: dict[str, Any],
+    failed_kpis: list[str],
 ) -> tuple[dict[str, Any] | None, bool]:
     """Assemble one failure_report.json ticket entry when operational or KPI issues exist."""
     routing = result.get("routing") if isinstance(result.get("routing"), dict) else {}
@@ -674,6 +677,23 @@ def _build_failure_report_ticket(
     safety_checks = [
         check for check in all_guardrail_checks if check.get("check") in PRE_DRAFT_SAFETY_CHECK_NAMES
     ]
+    raw_pre_routing = result.get("pre_routing_checks")
+    if (
+        isinstance(raw_pre_routing, dict)
+        and isinstance(raw_pre_routing.get("data_checks"), list)
+        and isinstance(raw_pre_routing.get("safety_checks"), list)
+    ):
+        pre_routing_checks = {
+            "data_checks": [dict(c) for c in raw_pre_routing["data_checks"] if isinstance(c, dict)],
+            "safety_checks": [
+                dict(c) for c in raw_pre_routing["safety_checks"] if isinstance(c, dict)
+            ],
+        }
+    else:
+        pre_routing_checks = build_pre_routing_checks(
+            routing_checks=routing_checks,
+            safety_checks=safety_checks,
+        )
     post_draft_checks = [
         check for check in all_guardrail_checks if check.get("check") not in PRE_DRAFT_SAFETY_CHECK_NAMES
     ]
@@ -710,7 +730,7 @@ def _build_failure_report_ticket(
         or bool(blocked_non_eligibility_safety)
         or bool(failed_post_draft)
     )
-    if not has_operational_failure and not evaluation["failed_kpis"]:
+    if not has_operational_failure and not failed_kpis:
         return None, False
 
     first_blocking_check = _first_pre_draft_blocking_check(
@@ -763,12 +783,12 @@ def _build_failure_report_ticket(
             "final_route": result["route"],
             "final_reason": result["reason"],
             "error": error,
+            "failed_kpis": failed_kpis,
             "stopped_at": stopped_at,
             "failure_stage": failure_stage,
             "failed_check": failed_check,
             "before_drafting": {
-                "safety_checks": safety_checks,
-                "routing_checks": routing_checks,
+                "pre_routing_checks": pre_routing_checks,
                 "final_policy_decision": final_decision,
                 "first_blocking_check": first_blocking_check,
             },
@@ -1050,13 +1070,14 @@ def _format_ticket_main_reason(ticket: dict[str, Any]) -> str:
     """Summarize the primary blocker or KPI mismatch for one summary table row."""
     stopped_at = ticket.get("stopped_at")
     if stopped_at == "evaluation_only":
-        failed_kpis = ticket.get("evaluation", {}).get("failed_kpis") or []
+        failed_kpis = ticket.get("failed_kpis") or []
         return f"KPI mismatch: {', '.join(failed_kpis)}"
     if stopped_at == "before_drafting":
-        blocker = ticket.get("before_drafting", {}).get("first_blocking_check")
+        before = ticket.get("before_drafting") or {}
+        blocker = before.get("first_blocking_check")
         if blocker == "classification_confidence_check":
             check = _find_named_check(
-                ticket.get("before_drafting", {}).get("routing_checks") or [],
+                (before.get("pre_routing_checks") or {}).get("data_checks") or [],
                 "classification_confidence_check",
             )
             if check and isinstance(check.get("confidence"), (int, float)) and check.get("threshold") is not None:
@@ -1091,9 +1112,11 @@ def _render_failure_report_ticket_lines(ticket: dict[str, Any]) -> list[str]:
         lines.append(
             f"- Before drafting: passed; routed to `{_sanitize_markdown_text(ticket.get('final_route'))}`."
         )
+    lines.extend(_render_pre_routing_checks_lines(ticket))
 
+    failed_kpis = ticket.get("failed_kpis") or []
     evaluation = ticket.get("evaluation") or {}
-    mismatches = _format_kpi_mismatches(evaluation)
+    mismatches = _format_kpi_mismatches(failed_kpis, evaluation)
     if mismatches:
         lines.append(f"- Other mismatches: {_sanitize_markdown_text('; '.join(mismatches))}")
     doc_note = evaluation.get("expected_doc_note")
@@ -1107,10 +1130,14 @@ def _render_failure_report_ticket_lines(ticket: dict[str, Any]) -> list[str]:
 def _render_before_drafting_lines(ticket: dict[str, Any]) -> list[str]:
     """Render Blocker and Then lines for a ticket stopped before drafting."""
     before = ticket.get("before_drafting") or {}
-    routing_checks = before.get("routing_checks") or []
+    pre_routing = before.get("pre_routing_checks") or {}
+    all_checks = [
+        *(pre_routing.get("data_checks") or []),
+        *(pre_routing.get("safety_checks") or []),
+    ]
     blocker_name = before.get("first_blocking_check") or ticket.get("failed_check")
     blocker_text = _describe_pre_draft_blocker(ticket, before, blocker_name)
-    skipped = [c["name"] for c in routing_checks if isinstance(c, dict) and c.get("status") == "skipped"]
+    skipped = [c["name"] for c in all_checks if isinstance(c, dict) and c.get("status") == "skipped" and c.get("name")]
     final_route = _sanitize_markdown_text(ticket.get("final_route"))
     if skipped:
         then_text = (
@@ -1122,14 +1149,39 @@ def _render_before_drafting_lines(ticket: dict[str, Any]) -> list[str]:
     return [f"- Blocker: {blocker_text}", f"- Then: {then_text}"]
 
 
+def _render_pre_routing_checks_lines(ticket: dict[str, Any]) -> list[str]:
+    """Render grouped Data checks and Safety checks with names, statuses, and reasons."""
+    pre_routing = (ticket.get("before_drafting") or {}).get("pre_routing_checks") or {}
+    data_checks = pre_routing.get("data_checks") or []
+    safety_checks = pre_routing.get("safety_checks") or []
+    if not data_checks and not safety_checks:
+        return []
+    lines = ["- Pre-routing checks:"]
+    for group_label, checks in (("Data checks", data_checks), ("Safety checks", safety_checks)):
+        lines.append(f"  - {group_label}:")
+        for check in checks:
+            if not isinstance(check, dict):
+                continue
+            name = _sanitize_markdown_text(check.get("name") or check.get("check") or "unknown")
+            status = _sanitize_markdown_text(
+                check.get("status")
+                or ("passed" if check.get("passed", True) and not check.get("blocked", False) else "failed")
+            )
+            reason = _sanitize_markdown_text(check.get("reason") or check.get("evidence") or "")
+            lines.append(f"    - `{name}` (`{status}`): {reason}")
+    return lines
+
+
 def _describe_pre_draft_blocker(
     ticket: dict[str, Any],
     before: dict[str, Any],
     blocker_name: str | None,
 ) -> str:
     """Describe the first pre-draft check or validation error that blocked the ticket."""
-    routing_checks = before.get("routing_checks") or []
-    check = _find_named_check(routing_checks, blocker_name)
+    pre_routing = before.get("pre_routing_checks") or {}
+    data_checks = pre_routing.get("data_checks") or []
+    safety_checks = pre_routing.get("safety_checks") or []
+    check = _find_named_check(data_checks, blocker_name) or _find_named_check(safety_checks, blocker_name)
     if blocker_name == "classification_confidence_check" and check is not None:
         conf = check.get("confidence")
         threshold = check.get("threshold")
@@ -1138,13 +1190,16 @@ def _describe_pre_draft_blocker(
                 f"`classification_confidence_check`: confidence {conf:.3f} < threshold {threshold} "
                 f"({_sanitize_markdown_text(check.get('reason'))})"
             )
-    if check is not None and check.get("reason"):
-        return f"`{_sanitize_markdown_text(blocker_name)}`: {_sanitize_markdown_text(check.get('reason'))}"
-    safety_check = _find_named_check(before.get("safety_checks") or [], blocker_name, key="check")
+    if check is not None and (check.get("reason") or check.get("evidence")):
+        return (
+            f"`{_sanitize_markdown_text(blocker_name)}`: "
+            f"{_sanitize_markdown_text(check.get('reason') or check.get('evidence'))}"
+        )
+    safety_check = _find_named_check(safety_checks, blocker_name, key="check")
     if safety_check is not None:
         return (
             f"`{_sanitize_markdown_text(blocker_name)}`: "
-            f"{_sanitize_markdown_text(safety_check.get('evidence') or ticket.get('final_reason'))}"
+            f"{_sanitize_markdown_text(safety_check.get('evidence') or safety_check.get('reason') or ticket.get('final_reason'))}"
         )
     error = ticket.get("error")
     if isinstance(error, dict) and error.get("message"):
@@ -1204,14 +1259,20 @@ def _render_after_drafting_lines(ticket: dict[str, Any]) -> list[str]:
 
 def _format_before_drafting_pass_summary(ticket: dict[str, Any]) -> str:
     """Summarize passed pre-draft checks when a ticket failed during or after drafting."""
-    routing_checks = (ticket.get("before_drafting") or {}).get("routing_checks") or []
-    passed_count = sum(1 for c in routing_checks if isinstance(c, dict) and c.get("status") == "passed")
-    return f"passed ({passed_count} routing checks passed)." if passed_count else "passed."
+    pre_routing = (ticket.get("before_drafting") or {}).get("pre_routing_checks") or {}
+    all_checks = [
+        *(pre_routing.get("data_checks") or []),
+        *(pre_routing.get("safety_checks") or []),
+    ]
+    passed_count = sum(1 for c in all_checks if isinstance(c, dict) and c.get("status") == "passed")
+    return f"passed ({passed_count} pre-routing checks passed)." if passed_count else "passed."
 
 
-def _format_kpi_mismatches(evaluation: dict[str, Any]) -> list[str]:
+def _format_kpi_mismatches(
+    failed_kpis: list[str],
+    evaluation: dict[str, Any],
+) -> list[str]:
     """Format expected -> predicted strings for each failed KPI on a ticket."""
-    failed_kpis = evaluation.get("failed_kpis") or []
     expected = evaluation.get("expected") or {}
     predicted = evaluation.get("predicted") or {}
     kpi_pairs = {

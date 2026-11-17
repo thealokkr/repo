@@ -62,7 +62,13 @@ from cloudserve_support.processing.run_provenance import (
 from cloudserve_support.routing.policy_calibration import (
     load_frozen_routing_policy,
 )
-from cloudserve_support.processing.ticket_outcomes import build_ticket_outcome
+from cloudserve_support.processing.ticket_outcomes import (
+    PreRoutingSafetyEvaluation,
+    _report_pre_routing_progress,
+    build_pre_routing_checks,
+    build_ticket_outcome,
+    evaluate_pre_routing_safety,
+)
 from cloudserve_support.routing.routing_policy import (
     CLAIM_GROUNDING_PROMPT_VERSION,
     RoutingDecision,
@@ -92,6 +98,7 @@ class _PreparedTicket:
     retrieval: RetrievalResult | None = None
     decision: RoutingDecision | None = None
     policy_evaluation: dict[str, Any] | None = None
+    pre_routing_safety: PreRoutingSafetyEvaluation | None = None
     classification_request_duration_seconds: float = 0.0
 
 
@@ -127,22 +134,20 @@ def run_ticket_batch(
     resolved_input_path = input_path.expanduser().resolve()
     resolved_output_root = output_root.expanduser().resolve()
     resolved_database_path = database_path.expanduser().resolve()
-    run_id = uuid.uuid4().hex
     started_datetime = datetime.now(timezone.utc)
     started_at = started_datetime.isoformat().replace("+00:00", "Z")
-    output_directory_name = _run_output_directory_name(
-        label=label,
-        started_datetime=started_datetime,
-        run_id=run_id,
-    )
-    output_directory = resolved_output_root / output_directory_name
 
     connection = connect_runtime_database(resolved_database_path)
     run_record_committed = False
     try:
         resolved_output_root.mkdir(parents=True, exist_ok=True)
-        output_directory.mkdir(exist_ok=False)
         connection.execute("BEGIN IMMEDIATE")
+        run_id, output_directory = _allocate_run_id_and_directory(
+            connection=connection,
+            output_root=resolved_output_root,
+            label=label,
+            started_datetime=started_datetime,
+        )
         create_processing_run(
             connection,
             run_id=run_id,
@@ -255,7 +260,7 @@ def run_ticket_batch(
             policy,
             claim_grounding_fn=create_claim_grounding_checker(settings),
         )
-        for prepared_ticket in prepared_tickets:
+        for ticket_position, prepared_ticket in enumerate(prepared_tickets, start=1):
             classification = prepared_ticket.classification
             if classification is None:
                 classification = classification_failure(
@@ -279,6 +284,30 @@ def run_ticket_batch(
                 policy_evaluation
             )
             decision = prepared_ticket.decision
+            if progress_callback is not None:
+                _report_run_progress(
+                    progress_callback,
+                    f"Ticket {ticket_position}/{len(prepared_tickets)} ({prepared_ticket.ticket.ticket_id!r})",
+                    "ticket",
+                )
+                safety_eval = evaluate_pre_routing_safety(
+                    prepared_ticket.ticket,
+                    retrieval,
+                )
+                prepared_ticket.pre_routing_safety = safety_eval
+                pre_routing_checks = build_pre_routing_checks(
+                    routing_checks=policy_evaluation.get("checks", ()),
+                    safety_checks=safety_eval.safety_checks,
+                )
+                _report_pre_routing_progress(
+                    lambda step: _report_run_progress(progress_callback, step, "ticket_step"),
+                    pre_routing_checks,
+                )
+                _report_run_progress(
+                    progress_callback,
+                    f"Routing decision: {decision.route} ({decision.matched_rule})",
+                    "ticket_step",
+                )
             used_gemini_grounding = _routing_used_gemini_grounding(
                 policy_evaluation,
                 settings,
@@ -646,6 +675,7 @@ def _build_ticket_result(
         retrieval=retrieval,
         decision=decision,
         policy_evaluation=prepared_ticket.policy_evaluation,
+        pre_routing_safety=prepared_ticket.pre_routing_safety,
         policy=policy,
         policy_file_fingerprint=policy_file_fingerprint,
         classifier_implementation_fingerprint=classifier_implementation_fingerprint,
@@ -843,19 +873,47 @@ def _prepare_ticket_records(input_records: list[Any]) -> list[_PreparedTicket]:
     return prepared_tickets
 
 
-def _run_output_directory_name(
+def _usable_run_label(label: str | None) -> str | None:
+    """Return a filename-safe label prefix, or None when no usable label was supplied."""
+    if label is None or not label.strip():
+        return None
+    safe_label = re.sub(r"[^A-Za-z0-9._-]+", "-", label.strip()).strip("-._")
+    return safe_label or None
+
+
+def _allocate_run_id_and_directory(
     *,
+    connection: sqlite3.Connection,
+    output_root: Path,
     label: str | None,
     started_datetime: datetime,
-    run_id: str,
-) -> str:
-    """Build a safe label-and-UTC-minute folder name, or use the run ID without a label."""
-    if label is None or not label.strip():
-        return run_id
-    safe_label = re.sub(r"[^A-Za-z0-9._-]+", "-", label.strip()).strip("-._")
-    if not safe_label:
-        return run_id
-    return f"{safe_label}_{started_datetime:%Y-%m-%d_%H-%M}"
+) -> tuple[str, Path]:
+    """Allocate a collision-safe run_id and output directory matching its basename."""
+    safe_label = _usable_run_label(label)
+    if safe_label is None:
+        run_id = uuid.uuid4().hex
+        output_directory = output_root / run_id
+        output_directory.mkdir(exist_ok=False)
+        return run_id, output_directory
+
+    base_name = f"{safe_label}_{started_datetime:%Y-%m-%d_%H-%M}"
+    suffix = 1
+    while True:
+        candidate = base_name if suffix == 1 else f"{base_name}_{suffix}"
+        existing_row = connection.execute(
+            "SELECT 1 FROM processing_runs WHERE run_id = ?",
+            (candidate,),
+        ).fetchone()
+        if existing_row is not None:
+            suffix += 1
+            continue
+        candidate_directory = output_root / candidate
+        try:
+            candidate_directory.mkdir(exist_ok=False)
+        except FileExistsError:
+            suffix += 1
+            continue
+        return candidate, candidate_directory
 
 
 def _utc_timestamp() -> str:

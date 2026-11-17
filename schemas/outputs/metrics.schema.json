@@ -16,7 +16,7 @@
   "properties": {
     "run_id": {
       "type": "string",
-      "pattern": "^[0-9a-f]{32}$"
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
     },
     "total_count": {
       "type": "integer",
@@ -87,7 +87,7 @@
         },
         "run_id": {
           "type": "string",
-          "pattern": "^[0-9a-f]{32}$"
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
         },
         "source_set": {
           "enum": [
@@ -4032,7 +4032,7 @@
                 },
                 "run_id": {
                   "type": "string",
-                  "pattern": "^[0-9a-f]{32}$"
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
                 },
                 "source_set": {
                   "enum": [

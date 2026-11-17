@@ -396,18 +396,21 @@ def test_write_run_exports_writes_consolidated_failure_report_and_retires_legacy
     assert protected_item["failure_stage"] == "routing_policy"
     assert protected_item["failed_check"] == "protected_rule_check"
     assert protected_item["before_drafting"]["first_blocking_check"] == "protected_rule_check"
-    assert [c["name"] for c in protected_item["before_drafting"]["routing_checks"]] == [
-        "protected_rule_check",
+    assert [c["name"] for c in protected_item["before_drafting"]["pre_routing_checks"]["data_checks"]] == [
         "classification_confidence_check",
         "source_presence_check",
         "claim_grounding_check",
     ]
-    assert [c["status"] for c in protected_item["before_drafting"]["routing_checks"]] == [
-        "failed",
+    assert [c["status"] for c in protected_item["before_drafting"]["pre_routing_checks"]["data_checks"]] == [
         "skipped",
         "skipped",
         "skipped",
     ]
+    protected_safety = {
+        c["name"]: c["status"]
+        for c in protected_item["before_drafting"]["pre_routing_checks"]["safety_checks"]
+    }
+    assert protected_safety["protected_rule_check"] == "failed"
 
     grounding_item = tickets_by_id["T-GROUNDING"]
     assert grounding_item["stopped_at"] == "before_drafting"
@@ -416,7 +419,7 @@ def test_write_run_exports_writes_consolidated_failure_report_and_retires_legacy
     assert grounding_item["before_drafting"]["first_blocking_check"] == "claim_grounding_check"
     grounding_check = next(
         c
-        for c in grounding_item["before_drafting"]["routing_checks"]
+        for c in grounding_item["before_drafting"]["pre_routing_checks"]["data_checks"]
         if c["name"] == "claim_grounding_check"
     )
     assert grounding_check["unsupported_points"] == [
@@ -440,13 +443,9 @@ def test_write_run_exports_writes_consolidated_failure_report_and_retires_legacy
     assert "KB does not confirm legacy v1 key auto-expiration." in markdown
     assert "private_data_output" in markdown
 
-    assert failure_report["failed_records"] == [
-        {
-            "input_index": 0,
-            "ticket_id": "T-PASS",
-            "failed_kpis": ["urgency"],
-        }
-    ]
+    assert "failed_records" not in failure_report
+    assert tickets_by_id["T-PASS"]["failed_kpis"] == ["urgency"]
+    assert "failed_kpis" not in tickets_by_id["T-PASS"]["evaluation"]
 
 
 def test_write_run_exports_handles_zero_failure_run(tmp_path: Path) -> None:
@@ -566,7 +565,7 @@ def test_write_run_exports_handles_zero_failure_run(tmp_path: Path) -> None:
     assert failure_report["run"]["kpi_failed_record_count"] == 0
     assert failure_report["run"]["reported_ticket_count"] == 0
     assert failure_report["tickets"] == []
-    assert failure_report["failed_records"] == []
+    assert "failed_records" not in failure_report
     markdown = (output_dir / "failure_report.md").read_text(encoding="utf-8")
     assert "No operational failures or evaluation KPI mismatches occurred in this run." in markdown
 
@@ -1280,13 +1279,7 @@ def test_write_run_exports_builds_failure_report_json_strictly_from_sqlite_pre_d
     assert {"status", "target", "value", "populated_bands"}.issubset(calibration)
     assert len(calibration["populated_bands"]) == 2
 
-    assert report["failed_records"] == [
-        {
-            "input_index": 0,
-            "ticket_id": "T-KPI-ONLY",
-            "failed_kpis": ["urgency", "expected_doc_ids"],
-        }
-    ]
+    assert "failed_records" not in report
     by_id = {item["ticket_id"]: item for item in report["tickets"]}
     assert [item["ticket_id"] for item in report["tickets"]] == [
         "T-KPI-ONLY",
@@ -1297,24 +1290,33 @@ def test_write_run_exports_builds_failure_report_json_strictly_from_sqlite_pre_d
 
     kpi_ticket = by_id["T-KPI-ONLY"]
     assert kpi_ticket["stopped_at"] == "evaluation_only"
+    assert kpi_ticket["failed_kpis"] == ["urgency", "expected_doc_ids"]
+    ticket_fields = list(kpi_ticket)
+    assert ticket_fields[ticket_fields.index("error") + 1] == "failed_kpis"
+    assert "failed_kpis" not in kpi_ticket["evaluation"]
     assert kpi_ticket["evaluation"]["expected"]["urgency"] == "low"
     assert kpi_ticket["evaluation"]["predicted"]["urgency"] == "medium"
     assert kpi_ticket["evaluation"]["predicted"]["retrieved_doc_ids"] == [
         "DOC-API-001",
         "DOC-API-002",
     ]
-    assert kpi_ticket["evaluation"]["failed_kpis"] == ["urgency", "expected_doc_ids"]
     assert "DOC-API-002" in kpi_ticket["evaluation"]["expected_doc_note"]
 
     low_conf = by_id["T-LOW-CONF"]
+    assert low_conf["failed_kpis"] == []
+    assert "failed_kpis" not in low_conf["evaluation"]
     assert low_conf["stopped_at"] == "before_drafting"
     assert low_conf["before_drafting"]["first_blocking_check"] == "classification_confidence_check"
-    assert [c["status"] for c in low_conf["before_drafting"]["routing_checks"]] == [
-        "passed",
+    assert [c["status"] for c in low_conf["before_drafting"]["pre_routing_checks"]["data_checks"]] == [
         "failed",
         "skipped",
         "skipped",
     ]
+    low_conf_safety = {
+        c["name"]: c["status"]
+        for c in low_conf["before_drafting"]["pre_routing_checks"]["safety_checks"]
+    }
+    assert low_conf_safety["protected_rule_check"] == "passed"
     assert low_conf["drafting"]["attempted"] is False
     assert low_conf["after_drafting"] == {
         "status": "not_run",
@@ -1332,7 +1334,9 @@ def test_write_run_exports_builds_failure_report_json_strictly_from_sqlite_pre_d
     assert grounding["stopped_at"] == "before_drafting"
     assert grounding["before_drafting"]["first_blocking_check"] == "claim_grounding_check"
     grounding_check = next(
-        c for c in grounding["before_drafting"]["routing_checks"] if c["name"] == "claim_grounding_check"
+        c
+        for c in grounding["before_drafting"]["pre_routing_checks"]["data_checks"]
+        if c["name"] == "claim_grounding_check"
     )
     assert grounding_check["unsupported_points"] == [
         "Whether legacy v1 keys auto-expire in 24 hours."
@@ -1457,7 +1461,7 @@ def test_write_run_exports_failure_report_zero_failures_and_unpaired_surrogate(
     assert clean_report["run"]["operational_failure_count"] == 0
     assert clean_report["run"]["kpi_failed_record_count"] == 0
     assert clean_report["run"]["reported_ticket_count"] == 0
-    assert clean_report["failed_records"] == []
+    assert "failed_records" not in clean_report
     assert clean_report["tickets"] == []
 
     # AC-4: Unpaired UTF-16 surrogate in pre-draft failing ticket serializes safely.
@@ -1919,7 +1923,8 @@ def test_write_run_exports_populates_after_drafting_diagnostics_and_cited_docs(
         "DOC-DEPLOY-003",
     ]
     assert post_grounding["evaluation"]["predicted"]["cited_doc_ids"] == ["DOC-DEPLOY-003"]
-    assert "expected_doc_ids" in post_grounding["evaluation"]["failed_kpis"]
+    assert "expected_doc_ids" in post_grounding["failed_kpis"]
+    assert "failed_kpis" not in post_grounding["evaluation"]
     assert "DOC-DEPLOY-001" in post_grounding["evaluation"]["expected_doc_note"]
     assert "DOC-DEPLOY-003" in post_grounding["evaluation"]["expected_doc_note"]
 
@@ -1986,7 +1991,8 @@ def test_write_run_exports_populates_after_drafting_diagnostics_and_cited_docs(
         "DOC-API-002",
     ]
     assert emitted["evaluation"]["predicted"]["cited_doc_ids"] == ["DOC-API-002"]
-    assert "expected_doc_ids" in emitted["evaluation"]["failed_kpis"]
+    assert "expected_doc_ids" in emitted["failed_kpis"]
+    assert "failed_kpis" not in emitted["evaluation"]
     assert "DOC-API-001" in emitted["evaluation"]["expected_doc_note"]
     assert "DOC-API-002" in emitted["evaluation"]["expected_doc_note"]
 

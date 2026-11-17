@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable, Mapping
-from dataclasses import replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Any
 
 from cloudserve_support.classification.ticket_classification import TicketClassification
@@ -38,6 +38,21 @@ from cloudserve_support.processing.run_provenance import (
 from cloudserve_support.routing.routing_policy import RoutingDecision
 
 
+@dataclass(frozen=True)
+class PreRoutingSafetyEvaluation:
+    """Precomputed pre-routing safety screening results and filtered sources."""
+
+    current_sources: tuple[dict[str, Any], ...]
+    eligible_sources: tuple[dict[str, Any], ...]
+    eligible_related_sources: tuple[dict[str, Any], ...]
+    retained_sources: tuple[dict[str, Any], ...]
+    scrubbed_context: dict[str, Any]
+    ticket_injection_detected: bool
+    private_input_detected: bool
+    private_source_count: int
+    safety_checks: list[dict[str, Any]]
+
+
 def build_ticket_outcome(
     *,
     run_id: str,
@@ -47,6 +62,7 @@ def build_ticket_outcome(
     retrieval: RetrievalResult,
     decision: RoutingDecision,
     policy_evaluation: Mapping[str, Any] | None = None,
+    pre_routing_safety: PreRoutingSafetyEvaluation | None = None,
     policy: dict[str, Any],
     policy_file_fingerprint: str,
     classifier_implementation_fingerprint: str,
@@ -60,47 +76,19 @@ def build_ticket_outcome(
     _report_ticket_step(progress_callback, "Checking ticket and source safety")
     classification_payload = classification.as_dict()
     retrieval_payload = retrieval.as_dict()
-    current_sources, eligibility_evidence = eligible_source_subset(retrieval.sources)
-    ticket_injection_detected = contains_prompt_injection(ticket_text_for_generation(ticket))
-    injected_source_count = sum(
-        draft_source_contains_prompt_injection(source) for source in current_sources
+    safety_eval = (
+        pre_routing_safety
+        if pre_routing_safety is not None
+        else evaluate_pre_routing_safety(ticket, retrieval)
     )
-    private_source_count = sum(
-        contains_private_source_data(source) or draft_source_contains_private_data(source)
-        for source in current_sources
-    )
-    eligible_sources = tuple(
-        source
-        for source in current_sources
-        if not draft_source_contains_prompt_injection(source)
-        and not contains_private_source_data(source)
-        and not draft_source_contains_private_data(source)
-    )
-    eligible_related_sources = _screen_related_sources_for_drafting(
-        retrieval.related_sources,
-        primary_sources=eligible_sources,
-    )
-    retained_sources = (
-        *(_tag_source_snapshot(source, source_kind="primary") for source in eligible_sources),
-        *(
-            _tag_source_snapshot(source, source_kind="related")
-            for source in eligible_related_sources
-        ),
-    )
-    eligibility_evidence += (
-        f" {injected_source_count} instruction-bearing source(s) and "
-        f"{private_source_count} private-data source(s) excluded."
-    )
-    scrubbed_context_value = filter_evaluation_context(ticket.context)
-    scrubbed_context = (
-        scrubbed_context_value if isinstance(scrubbed_context_value, dict) else {}
-    )
-    private_input_text = json.dumps(
-        scrubbed_context, ensure_ascii=False, default=str
-    )
-    private_input_detected = contains_private_data(
-        ticket_text_for_generation(ticket)
-    ) or contains_private_data(private_input_text)
+    eligible_sources = safety_eval.eligible_sources
+    eligible_related_sources = safety_eval.eligible_related_sources
+    retained_sources = safety_eval.retained_sources
+    scrubbed_context = safety_eval.scrubbed_context
+    ticket_injection_detected = safety_eval.ticket_injection_detected
+    private_input_detected = safety_eval.private_input_detected
+    private_source_count = safety_eval.private_source_count
+    pre_draft_safety_checks = safety_eval.safety_checks
     pre_provider_guardrail_block = ticket_injection_detected or private_input_detected
     injection_detected = ticket_injection_detected
     evidence_ready = bool(eligible_sources) and retrieval.evidence_ready
@@ -149,56 +137,11 @@ def build_ticket_outcome(
         policy_final_decision = policy_evaluation.get("final_decision")
         if isinstance(policy_final_decision, Mapping):
             routing_fields["final_decision"] = dict(policy_final_decision)
-    guardrail_checks = [
-        _make_guardrail_check(
-            "source_eligibility",
-            passed=bool(eligible_sources),
-            blocked=not bool(eligible_sources),
-            evidence=eligibility_evidence,
-            action="accepted" if eligible_sources else "no_source_available",
-        ),
-        _make_guardrail_check(
-            "prompt_injection",
-            passed=not injection_detected,
-            blocked=injection_detected,
-            evidence=(
-                "Untrusted ticket text contains an instruction override pattern."
-                if injection_detected
-                else (
-                    f"Ticket passed; {injected_source_count} instruction-bearing source(s) were excluded."
-                    if injected_source_count
-                    else "Ticket and eligible source text passed instruction screening."
-                )
-            ),
-            action=(
-                "block_and_escalate"
-                if injection_detected
-                else "exclude_untrusted_source" if injected_source_count else "continue"
-            ),
-        ),
-        _make_guardrail_check(
-            "private_data_input",
-            passed=not private_input_detected,
-            blocked=private_input_detected,
-            evidence=(
-                "Ticket input contains an email, credential-like value, or national identifier."
-                if private_input_detected
-                else "No supported private-data pattern was found in ticket input."
-            ),
-            action="block_and_escalate" if private_input_detected else "continue",
-        ),
-        _make_guardrail_check(
-            "private_data_source",
-            passed=private_source_count == 0,
-            blocked=private_source_count > 0,
-            evidence=(
-                "One or more retrieved passages contained private data and were withheld before generation."
-                if private_source_count
-                else "Retrieved passage titles and text passed the private-data screen."
-            ),
-            action="block_and_escalate" if private_source_count else "continue",
-        ),
-    ]
+    guardrail_checks = list(pre_draft_safety_checks)
+    pre_routing_checks = build_pre_routing_checks(
+        routing_checks=routing_fields.get("checks", ()),
+        safety_checks=guardrail_checks,
+    )
 
     route = "degrade" if issues else policy_route
     reason = (
@@ -435,6 +378,7 @@ def build_ticket_outcome(
         "draft": draft,
         "handoff": handoff,
         "guardrails": {"checks": guardrail_checks},
+        "pre_routing_checks": pre_routing_checks,
         "generation": generation,
         "draft_generation_request_duration_seconds": (
             draft_generation_request_duration_seconds
@@ -805,6 +749,190 @@ def _report_ticket_step(
     """Report one ticket-processing step when the CLI requested detailed progress."""
     if progress_callback is not None:
         progress_callback(step)
+
+
+_PRE_ROUTING_SAFETY_ROUTING_CHECK_NAMES = frozenset({"protected_rule_check"})
+_PRE_ROUTING_SAFETY_GUARDRAIL_CHECK_NAMES = frozenset(
+    {
+        "source_eligibility",
+        "prompt_injection",
+        "private_data_input",
+        "private_data_source",
+    }
+)
+
+
+def build_pre_routing_checks(
+    *,
+    routing_checks: Sequence[Mapping[str, Any]],
+    safety_checks: Sequence[Mapping[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Group pre-routing diagnostics into data_checks and safety_checks."""
+    data_checks: list[dict[str, Any]] = []
+    grouped_safety_checks: list[dict[str, Any]] = []
+
+    for check in routing_checks:
+        if not isinstance(check, Mapping):
+            continue
+        item = dict(check)
+        if item.get("name") in _PRE_ROUTING_SAFETY_ROUTING_CHECK_NAMES:
+            grouped_safety_checks.append(item)
+        else:
+            data_checks.append(item)
+
+    for check in safety_checks:
+        if not isinstance(check, Mapping):
+            continue
+        check_name = check.get("check")
+        if check_name not in _PRE_ROUTING_SAFETY_GUARDRAIL_CHECK_NAMES:
+            continue
+        passed = bool(check.get("passed", True)) and not bool(check.get("blocked", False))
+        grouped_safety_checks.append(
+            {
+                "name": check_name,
+                "status": "passed" if passed else "failed",
+                "reason": check.get("evidence") or "",
+                **dict(check),
+            }
+        )
+
+    return {
+        "data_checks": data_checks,
+        "safety_checks": grouped_safety_checks,
+    }
+
+
+def evaluate_pre_routing_safety(
+    ticket: CanonicalTicket,
+    retrieval: RetrievalResult,
+) -> PreRoutingSafetyEvaluation:
+    """Evaluate pre-routing safety guardrails and return safe sources plus check records."""
+    current_sources, eligibility_evidence = eligible_source_subset(retrieval.sources)
+    ticket_injection_detected = contains_prompt_injection(ticket_text_for_generation(ticket))
+    injected_source_count = sum(
+        draft_source_contains_prompt_injection(source) for source in current_sources
+    )
+    private_source_count = sum(
+        contains_private_source_data(source) or draft_source_contains_private_data(source)
+        for source in current_sources
+    )
+    eligible_sources = tuple(
+        source
+        for source in current_sources
+        if not draft_source_contains_prompt_injection(source)
+        and not contains_private_source_data(source)
+        and not draft_source_contains_private_data(source)
+    )
+    eligible_related_sources = _screen_related_sources_for_drafting(
+        retrieval.related_sources,
+        primary_sources=eligible_sources,
+    )
+    retained_sources = (
+        *(_tag_source_snapshot(source, source_kind="primary") for source in eligible_sources),
+        *(
+            _tag_source_snapshot(source, source_kind="related")
+            for source in eligible_related_sources
+        ),
+    )
+    eligibility_evidence += (
+        f" {injected_source_count} instruction-bearing source(s) and "
+        f"{private_source_count} private-data source(s) excluded."
+    )
+    scrubbed_context_value = filter_evaluation_context(ticket.context)
+    scrubbed_context = (
+        scrubbed_context_value if isinstance(scrubbed_context_value, dict) else {}
+    )
+    private_input_text = json.dumps(
+        scrubbed_context, ensure_ascii=False, default=str
+    )
+    private_input_detected = contains_private_data(
+        ticket_text_for_generation(ticket)
+    ) or contains_private_data(private_input_text)
+    safety_checks = [
+        _make_guardrail_check(
+            "source_eligibility",
+            passed=bool(eligible_sources),
+            blocked=not bool(eligible_sources),
+            evidence=eligibility_evidence,
+            action="accepted" if eligible_sources else "no_source_available",
+        ),
+        _make_guardrail_check(
+            "prompt_injection",
+            passed=not ticket_injection_detected,
+            blocked=ticket_injection_detected,
+            evidence=(
+                "Untrusted ticket text contains an instruction override pattern."
+                if ticket_injection_detected
+                else (
+                    f"Ticket passed; {injected_source_count} instruction-bearing source(s) were excluded."
+                    if injected_source_count
+                    else "Ticket and eligible source text passed instruction screening."
+                )
+            ),
+            action=(
+                "block_and_escalate"
+                if ticket_injection_detected
+                else "exclude_untrusted_source" if injected_source_count else "continue"
+            ),
+        ),
+        _make_guardrail_check(
+            "private_data_input",
+            passed=not private_input_detected,
+            blocked=private_input_detected,
+            evidence=(
+                "Ticket input contains an email, credential-like value, or national identifier."
+                if private_input_detected
+                else "No supported private-data pattern was found in ticket input."
+            ),
+            action="block_and_escalate" if private_input_detected else "continue",
+        ),
+        _make_guardrail_check(
+            "private_data_source",
+            passed=private_source_count == 0,
+            blocked=private_source_count > 0,
+            evidence=(
+                "One or more retrieved passages contained private data and were withheld before generation."
+                if private_source_count
+                else "Retrieved passage titles and text passed the private-data screen."
+            ),
+            action="block_and_escalate" if private_source_count else "continue",
+        ),
+    ]
+    return PreRoutingSafetyEvaluation(
+        current_sources=current_sources,
+        eligible_sources=eligible_sources,
+        eligible_related_sources=eligible_related_sources,
+        retained_sources=retained_sources,
+        scrubbed_context=scrubbed_context,
+        ticket_injection_detected=ticket_injection_detected,
+        private_input_detected=private_input_detected,
+        private_source_count=private_source_count,
+        safety_checks=safety_checks,
+    )
+
+
+def _report_pre_routing_progress(
+    progress_callback: Callable[[str], None] | None,
+    pre_routing_checks: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> None:
+    """Emit grouped data and safety pre-routing check lines for CLI progress."""
+    if progress_callback is None:
+        return
+    progress_callback("Pre-routing checks:")
+    for group_label, group_key in (
+        ("Data checks", "data_checks"),
+        ("Safety checks", "safety_checks"),
+    ):
+        progress_callback(f"  - {group_label}:")
+        for check in pre_routing_checks.get(group_key, ()):
+            name = check.get("name") or check.get("check") or "unknown"
+            status = check.get("status") or (
+                "passed"
+                if check.get("passed", True) and not check.get("blocked", False)
+                else "failed"
+            )
+            reason = check.get("reason") or check.get("evidence") or ""
+            progress_callback(f"    - {name} [{status}]: {reason}")
 
 
 def _read_generation_request_duration(generator: DraftGenerationProvider) -> float:

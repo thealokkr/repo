@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 from jsonschema import ValidationError
 import pytest
@@ -15,6 +16,11 @@ from cloudserve_support.classification.ticket_classification import (
 )
 from cloudserve_support.config import Settings
 from cloudserve_support.domain.ticket import CanonicalTicket
+from cloudserve_support.evaluation.quality_judge import (
+    QUALITY_JUDGE_SAMPLE_SEED,
+    _build_quality_judge_scorecard,
+)
+from cloudserve_support.evaluation.run_metrics import evaluate_completed_run
 from cloudserve_support.generation.draft_generation import OfflineDraftGenerationProvider
 from cloudserve_support.ingestion.ticket_normalization import normalize_ticket_record
 from cloudserve_support.knowledge.retrieval import MINIMUM_SIMILARITY, RetrievalResult
@@ -201,12 +207,9 @@ def _sample_kb_source(doc_id: str, passage_id: str, title: str, text: str, **ext
     return snapshot
 
 
-def test_output_schemas_sync_and_validate_policy_checks_and_source_kind() -> None:
-    """AC-1: Synchronized result.schema.json validates checks[], final_decision, and source_kind."""
-    initialize_output_schemas(OUTPUT_SCHEMA_DIRECTORY)
-    schemas = load_output_schemas()
+def _sample_valid_result_row() -> dict[str, Any]:
     policy = json.loads(TEST_ROUTING_POLICY_PATH.read_text(encoding="utf-8"))
-    valid_row = {
+    return {
         "run_id": "a" * 32,
         "input_index": 0,
         "ticket_id": "T-SCHEMA-1",
@@ -341,6 +344,13 @@ def test_output_schemas_sync_and_validate_policy_checks_and_source_kind() -> Non
         "draft_generation_request_duration_seconds": 0.0,
         "processing_latency_seconds": 0.1,
     }
+
+
+def test_output_schemas_sync_and_validate_policy_checks_and_source_kind() -> None:
+    """AC-1: Synchronized result.schema.json validates checks[], final_decision, and source_kind."""
+    initialize_output_schemas(OUTPUT_SCHEMA_DIRECTORY)
+    schemas = load_output_schemas()
+    valid_row = _sample_valid_result_row()
     validate_output_record(valid_row, schema_filename="result.schema.json", schemas=schemas)
 
     extra_top_level = {**valid_row, "unexpected_field": True}
@@ -350,6 +360,78 @@ def test_output_schemas_sync_and_validate_policy_checks_and_source_kind() -> Non
     extra_routing = {**valid_row, "routing": {**valid_row["routing"], "extra_routing_key": 1}}
     with pytest.raises(ValidationError):
         validate_output_record(extra_routing, schema_filename="result.schema.json", schemas=schemas)
+
+
+def test_result_schema_accepts_optional_pre_routing_checks_and_rejects_malformed_groups() -> None:
+    """AC-1/AC-2: result.schema.json accepts optional pre_routing_checks and rejects malformed groups."""
+    initialize_output_schemas(OUTPUT_SCHEMA_DIRECTORY)
+    schemas = load_output_schemas()
+
+    legacy_row = _sample_valid_result_row()
+    assert "pre_routing_checks" not in legacy_row
+    validate_output_record(legacy_row, schema_filename="result.schema.json", schemas=schemas)
+
+    data_checks = [
+        {
+            "name": "classification_confidence_check",
+            "status": "passed",
+            "confidence": 0.91,
+            "threshold": 0.65,
+            "matched_rule": None,
+            "reason": "Confidence meets threshold.",
+        },
+        {
+            "name": "source_presence_check",
+            "status": "passed",
+            "confidence": 1.0,
+            "retrieved_doc_ids": ["DOC-API-001"],
+            "related_doc_ids": ["DOC-SEC-001"],
+            "excluded_source_count": 0,
+            "matched_rule": None,
+            "reason": "Approved primary source present.",
+        },
+    ]
+    safety_checks = [
+        {
+            "name": "protected_rule_check",
+            "status": "passed",
+            "confidence": 1.0,
+            "matched_rule": None,
+            "protected_case": False,
+            "reason": "No protected rule matched.",
+        },
+        {
+            "check": "input_safety_guardrail",
+            "passed": True,
+            "blocked": False,
+            "evidence": "No safety risk detected.",
+            "action": "allow",
+        },
+    ]
+    grouped_row = {
+        **_sample_valid_result_row(),
+        "pre_routing_checks": {
+            "data_checks": data_checks,
+            "safety_checks": safety_checks,
+        },
+    }
+    validate_output_record(grouped_row, schema_filename="result.schema.json", schemas=schemas)
+    assert grouped_row["pre_routing_checks"]["data_checks"] == data_checks
+    assert grouped_row["pre_routing_checks"]["safety_checks"] == safety_checks
+
+    malformed_cases = [
+        {"safety_checks": safety_checks},
+        {"data_checks": data_checks},
+        {"data_checks": ["scalar-item"], "safety_checks": safety_checks},
+        {"data_checks": data_checks, "safety_checks": [123]},
+    ]
+    for malformed_pre_routing in malformed_cases:
+        invalid_row = {
+            **_sample_valid_result_row(),
+            "pre_routing_checks": malformed_pre_routing,
+        }
+        with pytest.raises(ValidationError):
+            validate_output_record(invalid_row, schema_filename="result.schema.json", schemas=schemas)
 
 
 def test_ticket_label_comparison_excludes_related_sources_and_preserves_legacy_rows(
@@ -693,4 +775,194 @@ def test_write_run_exports_validates_multi_route_results_with_policy_checks_and_
     failure_report = json.loads((output_dir / "failure_report.json").read_text(encoding="utf-8"))
     assert failure_report["run"]["run_id"] == run_id
     assert failure_report["run"]["kpi_failed_record_count"] == 0
-    assert failure_report["failed_records"] == []
+    assert "failed_records" not in failure_report
+
+
+def _sample_output_records(tmp_path: Path, run_id: str) -> dict[str, dict[str, Any]]:
+    """Build one schema-valid record per output contract for run_id validation tests."""
+    result_row = {**_sample_valid_result_row(), "run_id": run_id}
+    decision_row = {
+        "event_id": "0123456789abcdef0123456789abcdef",
+        "run_id": run_id,
+        "ticket_occurrence_id": f"{run_id}:0",
+        "input_index": 0,
+        "ticket_id": "T-SCHEMA-1",
+        "occurred_at": "2026-11-17T09:13:00Z",
+        "event_type": "classification",
+        "actor_type": "system",
+        "terminal": False,
+        "stage_result": {
+            "stage": "classification",
+            "status": "classified",
+            "value": {"intent": "api_key_issue"},
+            "reason": "Classified.",
+        },
+    }
+    input_path = tmp_path / "external_tickets.json"
+    input_path.write_text(
+        json.dumps([{"ticket_id": "T-SCHEMA-1", "channel": "email", "subject": "API key", "body": "Rotate?"}]),
+        encoding="utf-8",
+    )
+    evaluation = evaluate_completed_run(
+        run_id=run_id,
+        results=[result_row],
+        input_records=json.loads(input_path.read_text(encoding="utf-8")),
+        input_path=input_path,
+        source_ref="external",
+        decision_events=[decision_row],
+    )
+    metrics_row = {
+        "run_id": run_id,
+        "total_count": 1,
+        "completed_count": 1,
+        "failed_count": 0,
+        "exception_count": 0,
+        "route_counts": {"draft_for_review": 1, "escalate": 0, "degrade": 0},
+        "batch_export_duration_seconds": 0.01,
+        "evaluation": evaluation,
+    }
+    quality_judgment_row = {
+        "run_id": run_id,
+        "ticket_id": "T-SCHEMA-1",
+        "input_index": 0,
+        "sample_index": 0,
+        "judge_model": "gemini-3.8-flash",
+        "rubric_version": "v1",
+        "prompt_version": "v1",
+        "sample_seed": "seed-1",
+        "input_identity_sha256": "a" * 64,
+        "reference_available": False,
+        "status": "evaluated",
+        "dimension_scores": {
+            "relevance": {"score": 5, "rationale": "Relevant."},
+            "factual_correctness": {"score": 5, "rationale": "Accurate."},
+            "completeness_actionability": {"score": 5, "rationale": "Complete."},
+            "clarity": {"score": 5, "rationale": "Clear."},
+        },
+        "overall_quality_score": 5.0,
+        "citation_judgments": [],
+        "unsupported_factual_claims": [],
+        "error": None,
+    }
+    exception_row = {
+        "run_id": run_id,
+        "input_index": 0,
+        "ticket_id": "T-SCHEMA-1",
+        "occurred_at": "2026-11-17T09:13:00Z",
+        "error_code": "invalid_ticket_record",
+        "message": "Malformed record.",
+    }
+    return {
+        "result.schema.json": result_row,
+        "decision-log.schema.json": decision_row,
+        "metrics.schema.json": metrics_row,
+        "quality-judgment.schema.json": quality_judgment_row,
+        "exception.schema.json": exception_row,
+    }
+
+
+@pytest.mark.parametrize(
+    "run_id",
+    [
+        "0123456789abcdef0123456789abcdef",
+        "single-ticket_2026-11-17_09-13",
+    ],
+)
+@pytest.mark.parametrize(
+    "schema_filename",
+    [
+        "result.schema.json",
+        "decision-log.schema.json",
+        "metrics.schema.json",
+        "quality-judgment.schema.json",
+        "exception.schema.json",
+    ],
+)
+def test_output_schemas_accept_uuid_and_safe_folder_run_ids(
+    tmp_path: Path,
+    run_id: str,
+    schema_filename: str,
+) -> None:
+    """AC-1: Every output schema with run_id accepts both legacy UUIDs and safe folder names."""
+    initialize_output_schemas(OUTPUT_SCHEMA_DIRECTORY)
+    schemas = load_output_schemas()
+    records = _sample_output_records(tmp_path, run_id)
+    validate_output_record(records[schema_filename], schema_filename=schema_filename, schemas=schemas)
+
+
+@pytest.mark.parametrize(
+    "unsafe_run_id",
+    [
+        "bad/run",
+        "bad\\run",
+        "bad run",
+        "bad\trun",
+        ".hidden",
+        "..",
+        "",
+    ],
+)
+@pytest.mark.parametrize(
+    "schema_filename",
+    [
+        "result.schema.json",
+        "decision-log.schema.json",
+        "metrics.schema.json",
+        "quality-judgment.schema.json",
+        "exception.schema.json",
+    ],
+)
+def test_output_schemas_reject_unsafe_run_ids(
+    tmp_path: Path,
+    unsafe_run_id: str,
+    schema_filename: str,
+) -> None:
+    """AC-2: Every output schema rejects path separators, whitespace, and unsafe run_id values."""
+    schemas = load_output_schemas()
+    records = _sample_output_records(tmp_path, "single-ticket_2026-11-17_09-13")
+    invalid_record = {**records[schema_filename], "run_id": unsafe_run_id}
+    with pytest.raises(ValidationError):
+        validate_output_record(invalid_record, schema_filename=schema_filename, schemas=schemas)
+
+
+def test_output_schemas_reject_nested_unsafe_run_ids_and_non_uuid_event_id(tmp_path: Path) -> None:
+    """AC-2: Nested metrics run_id fields reject unsafe IDs and event_id remains UUID-only."""
+    schemas = load_output_schemas()
+    records = _sample_output_records(tmp_path, "single-ticket_2026-11-17_09-13")
+
+    metrics_bad_eval = json.loads(json.dumps(records["metrics.schema.json"]))
+    metrics_bad_eval["evaluation"]["run_id"] = "bad/eval"
+    with pytest.raises(ValidationError):
+        validate_output_record(metrics_bad_eval, schema_filename="metrics.schema.json", schemas=schemas)
+
+    metrics_bad_judge = json.loads(json.dumps(records["metrics.schema.json"]))
+    scorecard = _build_quality_judge_scorecard(
+        run_id="bad judge",
+        input_identity_sha256="a" * 64,
+        ground_truth_sha256=None,
+        sample_seed=QUALITY_JUDGE_SAMPLE_SEED,
+        available_draft_count=0,
+        selected_ticket_ids=[],
+        reference_available_count=0,
+        citation_occurrence_count=0,
+        judgment_rows=[],
+        source_set="external",
+        operational_artifact_sha256={
+            "results.jsonl": "b" * 64,
+            "decision_log.jsonl": "c" * 64,
+        },
+    )
+    metrics_bad_judge["evaluation"]["criteria"]["llm_judge"] = scorecard
+    with pytest.raises(ValidationError):
+        validate_output_record(metrics_bad_judge, schema_filename="metrics.schema.json", schemas=schemas)
+
+    decision_bad_event_id = {
+        **records["decision-log.schema.json"],
+        "event_id": "single-ticket_2026-11-17_09-13",
+    }
+    with pytest.raises(ValidationError):
+        validate_output_record(
+            decision_bad_event_id,
+            schema_filename="decision-log.schema.json",
+            schemas=schemas,
+        )
