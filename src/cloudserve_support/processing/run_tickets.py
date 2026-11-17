@@ -262,7 +262,16 @@ def run_ticket_batch(
             policy,
             claim_grounding_fn=create_claim_grounding_checker(settings),
         )
-        for prepared_ticket in prepared_tickets:
+        for routing_position, prepared_ticket in enumerate(prepared_tickets, start=1):
+            routing_progress_label = (
+                f"Routing ticket {routing_position}/{len(prepared_tickets)} "
+                f"({prepared_ticket.ticket.ticket_id!r})"
+            )
+            _report_run_progress(
+                progress_callback,
+                routing_progress_label,
+                "routing_ticket_started",
+            )
             classification = prepared_ticket.classification
             if classification is None:
                 classification = classification_failure(
@@ -308,6 +317,35 @@ def run_ticket_batch(
                     CLAIM_GROUNDING_PROMPT_VERSION if used_gemini_grounding else None
                 ),
             )
+            if progress_callback is not None:
+                grounding_checker = routing_evaluator.claim_grounding_fn
+                grounding_request_duration = getattr(
+                    grounding_checker,
+                    "last_request_duration_seconds",
+                    0.0,
+                )
+                if (
+                    used_gemini_grounding
+                    and isinstance(grounding_request_duration, (int, float))
+                    and not isinstance(grounding_request_duration, bool)
+                    and grounding_request_duration > 0
+                ):
+                    _report_run_progress(
+                        progress_callback,
+                        "Gemini claim-grounding request took "
+                        f"{grounding_request_duration:.2f}s",
+                        "routing_ticket_detail",
+                    )
+                _report_run_progress(
+                    progress_callback,
+                    f"Routing decision: {decision.route} ({decision.matched_rule})",
+                    "routing_ticket_detail",
+                )
+            _report_run_progress(
+                progress_callback,
+                routing_progress_label,
+                "routing_ticket_finished",
+            )
         _report_run_progress(progress_callback, "Routing", "done")
 
         _report_run_progress(progress_callback, "Ticket processing", "in_progress")
@@ -333,9 +371,6 @@ def run_ticket_batch(
                     safety_checks=safety_eval.safety_checks,
                 )
                 _report_pre_routing_progress(report_ticket_step, pre_routing_checks)
-                report_ticket_step(
-                    f"Routing decision: {decision.route} ({decision.matched_rule})"
-                )
             ticket_started = time.perf_counter()
             result, storage_ticket_id, ticket = _build_ticket_result(
                 prepared_ticket,
@@ -351,6 +386,11 @@ def run_ticket_batch(
                     report_ticket_step if progress_callback is not None else None
                 ),
             )
+            draft_request_duration = result["draft_generation_request_duration_seconds"]
+            if progress_callback is not None and draft_request_duration > 0:
+                report_ticket_step(
+                    f"Draft generation provider request took {draft_request_duration:.2f}s"
+                )
             _report_run_progress(
                 progress_callback,
                 "Persisting audit events and ticket status",

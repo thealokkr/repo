@@ -206,6 +206,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.print_help()
         return 0
 
+    progress_printer = _RunProgressPrinter()
     try:
         _run_id, output_directory, _metrics = run_ticket_batch(
             input_path=parsed.input,
@@ -215,7 +216,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             label=parsed.label,
             skip_draft=parsed.skip_draft,
             skip_draft_review=parsed.skip_draft_review,
-            progress_callback=_print_run_progress,
+            progress_callback=progress_printer,
         )
     except Exception as error:
         print(f"cloudserve: error: {error}", file=sys.stderr)
@@ -232,17 +233,44 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-def _print_run_progress(stage: str, status: str) -> None:
-    """Print run-stage transitions and grouped per-ticket processing steps."""
-    if status == "ticket":
-        print(f"{stage}:", flush=True)
-    elif status == "ticket_step":
-        if stage.startswith("  "):
-            print(f"  {stage}", flush=True)
-        else:
-            print(f"  - {stage}", flush=True)
-    elif status == "ticket_separator":
-        print(flush=True)
-    else:
-        message = "in progress..." if status == "in_progress" else "done."
-        print(f"{stage} {message}", flush=True)
+class _RunProgressPrinter:
+    """Print pipeline phases and per-ticket work with elapsed wall-clock seconds."""
+
+    def __init__(self) -> None:
+        self._phase_started_at: dict[str, float] = {}
+        self._routing_ticket_started_at: dict[str, float] = {}
+        self._ticket_started_at: float | None = None
+        self._ticket_label: str | None = None
+
+    def __call__(self, stage: str, status: str) -> None:
+        now = time.perf_counter()
+        if status == "in_progress":
+            self._phase_started_at[stage] = now
+            print(f"{stage} in progress...", flush=True)
+        elif status == "done":
+            started_at = self._phase_started_at.pop(stage, now)
+            print(f"{stage} done in {now - started_at:.2f}s.", flush=True)
+        elif status == "routing_ticket_started":
+            self._routing_ticket_started_at[stage] = now
+            print(f"  {stage} in progress...", flush=True)
+        elif status == "routing_ticket_finished":
+            started_at = self._routing_ticket_started_at.pop(stage, now)
+            print(f"  {stage} done in {now - started_at:.2f}s.", flush=True)
+        elif status == "routing_ticket_detail":
+            print(f"    - {stage}", flush=True)
+        elif status == "ticket":
+            self._ticket_started_at = now
+            self._ticket_label = stage
+            print(f"{stage}:", flush=True)
+        elif status == "ticket_step":
+            if stage.startswith("  "):
+                print(f"  {stage}", flush=True)
+            else:
+                print(f"  - {stage}", flush=True)
+        elif status == "ticket_separator":
+            if self._ticket_started_at is not None and self._ticket_label is not None:
+                duration = now - self._ticket_started_at
+                print(f"  - {self._ticket_label} completed in {duration:.2f}s.", flush=True)
+                self._ticket_started_at = None
+                self._ticket_label = None
+            print(flush=True)

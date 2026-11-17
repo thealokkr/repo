@@ -1438,7 +1438,7 @@ def test_grouped_pre_routing_checks_across_sqlite_exports_and_cli_progress(
             assert check["name"] in rendered
             assert check["status"] in rendered
             assert check["reason"] in rendered
-    assert "Pre-draft checks:" in stdout
+    assert "Pre-draft check results (computed during routing):" in stdout
     assert "Pre-routing checks:" in markdown
     post_draft_checks = {
         check["check"]: check
@@ -1463,21 +1463,26 @@ def test_grouped_pre_routing_checks_across_sqlite_exports_and_cli_progress(
     assert "Post-draft checks: not run (no draft generated)" in stdout
     ordered_progress = (
         "Routing in progress...",
-        "Routing done.",
+        "Routing ticket 1/2 ('T-ELIGIBLE') in progress...",
+        "Routing decision:",
+        "Routing ticket 1/2 ('T-ELIGIBLE') done in ",
+        "Routing ticket 2/2 ('T-PROTECTED') in progress...",
+        "Routing decision:",
+        "Routing ticket 2/2 ('T-PROTECTED') done in ",
+        "Routing done in ",
         "Ticket processing in progress...",
         "Ticket 1/2 ('T-ELIGIBLE'):",
-        "Pre-draft checks:",
+        "Pre-draft check results (computed during routing):",
         "Data checks:",
         "Safety checks:",
-        "Routing decision:",
         "Draft eligibility: eligible",
         "Generating draft",
         "Post-draft checks:",
         "Persisting audit events and ticket status",
         "Ticket result persisted",
+        "Ticket 1/2 ('T-ELIGIBLE') completed in ",
         "Ticket 2/2 ('T-PROTECTED'):",
-        "Pre-draft checks:",
-        "Routing decision:",
+        "Pre-draft check results (computed during routing):",
         "Draft eligibility: not eligible (route: escalate)",
         "Draft generation skipped (route: escalate)",
         "Post-draft checks: not run (no draft generated)",
@@ -1485,7 +1490,8 @@ def test_grouped_pre_routing_checks_across_sqlite_exports_and_cli_progress(
         "Finalizing ticket outcome",
         "Persisting audit events and ticket status",
         "Ticket result persisted",
-        "Ticket processing done.",
+        "Ticket 2/2 ('T-PROTECTED') completed in ",
+        "Ticket processing done in ",
     )
     cursor = 0
     for stage in ordered_progress:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from cloudserve_support import cli
@@ -37,19 +38,32 @@ def test_run_prints_stage_progress_output_folder_and_metrics_table(
         progress_callback = kwargs["progress_callback"]
         progress_callback("Classification", "in_progress")
         progress_callback("Classification", "done")
+        progress_callback("Retrieval", "in_progress")
+        progress_callback("Retrieval", "done")
         progress_callback("Routing", "in_progress")
+        routing_label = "Routing ticket 1/2 ('DEV-0001')"
+        progress_callback(routing_label, "routing_ticket_started")
+        progress_callback(
+            "Gemini claim-grounding request took 1.23s", "routing_ticket_detail"
+        )
+        progress_callback(
+            "Routing decision: draft_for_review (eligible)", "routing_ticket_detail"
+        )
+        progress_callback(routing_label, "routing_ticket_finished")
         progress_callback("Routing", "done")
         progress_callback("Ticket processing", "in_progress")
         progress_callback("Ticket 1/2 ('DEV-0001')", "ticket")
-        progress_callback("Pre-draft checks:", "ticket_step")
+        progress_callback(
+            "Pre-draft check results (computed during routing):", "ticket_step"
+        )
         progress_callback("  - Data checks:", "ticket_step")
         progress_callback(
             "    - classification_confidence_check [passed]: confidence is sufficient",
             "ticket_step",
         )
-        progress_callback("Routing decision: draft_for_review (eligible)", "ticket_step")
         progress_callback("Draft eligibility: eligible", "ticket_step")
         progress_callback("Generating draft", "ticket_step")
+        progress_callback("Draft generation provider request took 0.45s", "ticket_step")
         progress_callback("Post-draft checks:", "ticket_step")
         progress_callback(
             "  - citation_grounding [passed]: claims are source-grounded",
@@ -61,6 +75,8 @@ def test_run_prints_stage_progress_output_folder_and_metrics_table(
         progress_callback("Draft generation skipped (route: escalate)", "ticket_step")
         progress_callback("", "ticket_separator")
         progress_callback("Ticket processing", "done")
+        progress_callback("Export finalization", "in_progress")
+        progress_callback("Export finalization", "done")
         return "run-123", output_directory, {"internal_metric_dump": "hidden"}
 
     monkeypatch.setattr(cli, "run_ticket_batch", fake_run_ticket_batch)
@@ -79,25 +95,30 @@ def test_run_prints_stage_progress_output_folder_and_metrics_table(
 
     output = capsys.readouterr().out
     assert "Classification in progress..." in output
-    assert "Classification done." in output
+    assert re.search(r"Classification done in [0-9]+\.[0-9]{2}s\.", output)
+    assert re.search(r"Retrieval done in [0-9]+\.[0-9]{2}s\.", output)
+    assert "Routing ticket 1/2 ('DEV-0001') in progress..." in output
+    assert re.search(r"Routing ticket 1/2 .* done in [0-9]+\.[0-9]{2}s\.", output)
+    assert "Gemini claim-grounding request took 1.23s" in output
+    assert re.search(r"Routing done in [0-9]+\.[0-9]{2}s\.", output)
     assert (
-        "Routing in progress...\n"
-        "Routing done.\n"
         "Ticket processing in progress...\n"
         "Ticket 1/2 ('DEV-0001'):\n"
-        "  - Pre-draft checks:\n"
+        "  - Pre-draft check results (computed during routing):\n"
         "    - Data checks:\n"
         "      - classification_confidence_check [passed]: confidence is sufficient\n"
-        "  - Routing decision: draft_for_review (eligible)\n"
         "  - Draft eligibility: eligible\n"
         "  - Generating draft\n"
+        "  - Draft generation provider request took 0.45s\n"
         "  - Post-draft checks:\n"
         "    - citation_grounding [passed]: claims are source-grounded\n"
-        "  - Ticket result persisted\n\n"
-        "Ticket 2/2 ('DEV-0002'):\n"
-        "  - Draft generation skipped (route: escalate)\n\n"
-        "Ticket processing done."
+        "  - Ticket result persisted\n"
+        "  - Ticket 1/2 ('DEV-0001') completed in "
     ) in output
+    assert "Ticket 2/2 ('DEV-0002'):\n  - Draft generation skipped (route: escalate)" in output
+    assert "Ticket 2/2 ('DEV-0002') completed in " in output
+    assert re.search(r"Ticket processing done in [0-9]+\.[0-9]{2}s\.", output)
+    assert re.search(r"Export finalization done in [0-9]+\.[0-9]{2}s\.", output)
     assert f"Output folder: {output_directory}" in output
     assert "Metrics (metrics.md):" in output
     assert metrics_content in output

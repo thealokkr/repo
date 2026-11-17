@@ -1027,7 +1027,7 @@ def _report_pre_routing_progress(
     """Emit grouped data and safety pre-routing check lines for CLI progress."""
     if progress_callback is None:
         return
-    progress_callback("Pre-draft checks:")
+    progress_callback("Pre-draft check results (computed during routing):")
     for group_label, group_key in (
         ("Data checks", "data_checks"),
         ("Safety checks", "safety_checks"),
