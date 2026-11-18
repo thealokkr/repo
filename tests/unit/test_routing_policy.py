@@ -993,11 +993,12 @@ def test_source_presence_check_screens_real_kb_articles_and_excludes_labels_and_
 ) -> None:
     frozen_policy = load_frozen_routing_policy(FROZEN_POLICY_PATH)
     real_retrieval = _real_chroma_retrieval_for_doc("DOC-ACCT-001", tmp_path=tmp_path)
-    assert len(real_retrieval.sources) == 5
+    assert len(real_retrieval.sources) == 3
     assert "DOC-ACCT-001" in [s["doc_id"] for s in real_retrieval.sources]
     assert [s["doc_id"] for s in real_retrieval.related_sources] == [
         "DOC-DEPLOY-004",
-        "DOC-API-001",
+        "DOC-AUTH-004",
+        "DOC-SEC-002",
     ]
 
     # Check real RetrievalResult whole-article primary + related_docs snapshots.
@@ -1005,7 +1006,7 @@ def test_source_presence_check_screens_real_kb_articles_and_excludes_labels_and_
     real_check = evaluator.source_presence_check(retrieval=real_retrieval)
     assert real_check["status"] == "passed"
     assert real_check["retrieved_doc_ids"] == [s["doc_id"] for s in real_retrieval.sources]
-    assert real_check["related_doc_ids"] == ["DOC-DEPLOY-004", "DOC-API-001"]
+    assert real_check["related_doc_ids"] == ["DOC-DEPLOY-004", "DOC-AUTH-004", "DOC-SEC-002"]
     assert real_check["excluded_source_count"] == 0
 
     # Screen mixed safe, unapproved, expired, prompt-injected, and private-data snapshots.
@@ -1177,19 +1178,21 @@ def test_source_presence_check_screens_real_kb_articles_and_excludes_labels_and_
         assert hook_primary_ids == ["DOC-ACCT-001"]
         assert hook_related_ids == ["DOC-SEC-001"]
 
-    # Enforcing the 1-5 primary article cap rejects 6 distinct safe primary articles.
-    six_approved_primary = tuple(
+    # Enforcing the 1-3 primary article cap accepts 3 and rejects 4 distinct safe primary articles.
+    three_approved_primary = tuple(
         snapshots[doc_id]
         for doc_id in (
             "DOC-ACCT-001",
             "DOC-ACCT-002",
             "DOC-API-001",
-            "DOC-API-002",
-            "DOC-BILL-001",
-            "DOC-SEC-001",
         )
     )
-    too_many_check = evaluator.source_presence_check(sources=six_approved_primary)
+    within_cap_check = evaluator.source_presence_check(sources=three_approved_primary)
+    assert within_cap_check["status"] == "passed"
+    assert within_cap_check["retrieved_doc_ids"] == ["DOC-ACCT-001", "DOC-ACCT-002", "DOC-API-001"]
+
+    four_approved_primary = three_approved_primary + (snapshots["DOC-API-002"],)
+    too_many_check = evaluator.source_presence_check(sources=four_approved_primary)
     assert too_many_check["status"] == "failed"
     assert too_many_check["matched_rule"] == "evidence_not_ready"
 

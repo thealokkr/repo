@@ -745,7 +745,7 @@ class RoutingPolicyEvaluator:
         sources: Sequence[dict[str, Any]] | None = None,
         related_sources: Sequence[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Verify 1-5 approved, fresh, safe primary articles and record safe related doc IDs."""
+        """Verify 1-3 approved, fresh, safe primary articles and record safe related doc IDs."""
         check, _, _, _ = self._evaluate_source_presence(
             retrieval=retrieval,
             sources=sources,

@@ -30,7 +30,10 @@ from cloudserve_support.processing.run_provenance import (
     fingerprint_policy_file,
 )
 from cloudserve_support.processing.ticket_outcomes import build_ticket_outcome
-from cloudserve_support.reporting.run_exports import write_run_exports
+from cloudserve_support.reporting.run_exports import (
+    write_markdown_run_metrics,
+    write_run_exports,
+)
 from cloudserve_support.routing.routing_policy import RoutingPolicyEvaluator
 
 TEST_ROUTING_POLICY_PATH = (
@@ -1296,7 +1299,7 @@ def test_write_run_exports_builds_failure_report_json_strictly_from_sqlite_pre_d
 
     kpi_ticket = by_id["T-KPI-ONLY"]
     assert kpi_ticket["stopped_at"] == "evaluation_only"
-    assert kpi_ticket["failed_kpis"] == ["urgency", "expected_doc_ids"]
+    assert kpi_ticket["failed_kpis"] == ["urgency"]
     ticket_fields = list(kpi_ticket)
     assert ticket_fields[ticket_fields.index("error") + 1] == "failed_kpis"
     assert "failed_kpis" not in kpi_ticket["evaluation"]
@@ -1306,7 +1309,7 @@ def test_write_run_exports_builds_failure_report_json_strictly_from_sqlite_pre_d
         "DOC-API-001",
         "DOC-API-002",
     ]
-    assert "DOC-API-002" in kpi_ticket["evaluation"]["expected_doc_note"]
+    assert kpi_ticket["evaluation"]["expected_doc_note"] is None
 
     low_conf = by_id["T-LOW-CONF"]
     assert low_conf["failed_kpis"] == []
@@ -1762,7 +1765,7 @@ def test_write_run_exports_populates_after_drafting_diagnostics_and_cited_docs(
                 "urgency": "medium",
                 "expected_route": "draft_for_review",
                 "answerable_from_docs": True,
-                "expected_doc_ids": ["DOC-API-001"],
+                "expected_doc_ids": ["DOC-API-001", "DOC-API-003"],
                 "must_not_auto_respond": False,
             },
         },
@@ -1929,10 +1932,9 @@ def test_write_run_exports_populates_after_drafting_diagnostics_and_cited_docs(
         "DOC-DEPLOY-003",
     ]
     assert post_grounding["evaluation"]["predicted"]["cited_doc_ids"] == ["DOC-DEPLOY-003"]
-    assert "expected_doc_ids" in post_grounding["failed_kpis"]
+    assert "expected_doc_ids" not in post_grounding["failed_kpis"]
     assert "failed_kpis" not in post_grounding["evaluation"]
-    assert "DOC-DEPLOY-001" in post_grounding["evaluation"]["expected_doc_note"]
-    assert "DOC-DEPLOY-003" in post_grounding["evaluation"]["expected_doc_note"]
+    assert post_grounding["evaluation"]["expected_doc_note"] is None
 
     # AC-1(b): post-draft private_data_output block
     post_privacy = by_id["T-POST-PRIVACY"]
@@ -2276,7 +2278,7 @@ def test_write_run_exports_renders_simplified_failure_report_markdown_ac1(
                 "urgency": "medium",
                 "expected_route": "draft_for_review",
                 "answerable_from_docs": True,
-                "expected_doc_ids": ["DOC-DEPLOY-001"],
+                "expected_doc_ids": ["DOC-DEPLOY-001", "DOC-DEPLOY-002"],
                 "must_not_auto_respond": False,
             },
         },
@@ -2418,7 +2420,7 @@ def test_write_run_exports_renders_simplified_failure_report_markdown_ac1(
     assert "## T-MD-POST — After drafting" in md
     assert "3 rejected clause(s)" in md
     assert "DOC-DEPLOY-003" in md
-    assert "- Document note: Expected doc(s) DOC-DEPLOY-001 were retrieved" in md
+    assert "- Document note: Expected doc(s) DOC-DEPLOY-001 were partially retrieved" in md
     assert "- Document note:" not in md.split("## T-MD-EVAL")[1]
 
     assert "## T-MD-GEN — During drafting" in md
@@ -2949,6 +2951,254 @@ def test_write_run_exports_renders_noul_failed_claims_without_clauses(
     assert "1 rejected claim(s)" in md
     assert "noul=0.50" in md
     assert "Decisions Noul claim verification P(true)=0.50 failed" in md
+
+
+def test_write_run_exports_evaluates_expected_doc_ids_by_subsumption_and_empty_gating(
+    tmp_path: Path,
+) -> None:
+    """AC-1, AC-2, AC-3: Subsumption for non-empty expected_doc_ids and exact-empty gating for []."""
+    run_id = "8" * 32
+    policy = json.loads(TEST_ROUTING_POLICY_PATH.read_text(encoding="utf-8"))
+    policy_fingerprint = fingerprint_policy_file(TEST_ROUTING_POLICY_PATH)
+    classifier_fingerprint = fingerprint_classifier_model("gemini", "gemini-decision-1")
+    settings = Settings.from_env({"DRAFT_GENERATION_PROVIDER": "offline"})
+
+    api_doc_1 = _sample_kb_source(
+        "DOC-API-001",
+        "DOC-API-001:p1",
+        "API Keys",
+        "Rotate API keys from the dashboard settings page.",
+    )
+    api_doc_2 = _sample_kb_source(
+        "DOC-API-002",
+        "DOC-API-002:p1",
+        "API Scopes",
+        "Configure API key scopes in workspace permissions.",
+    )
+    auth_doc_2 = _sample_kb_source(
+        "DOC-AUTH-002",
+        "DOC-AUTH-002:p1",
+        "SSO Setup",
+        "Configure SSO settings in the admin console.",
+    )
+    perf_doc_1 = _sample_kb_source(
+        "DOC-PERF-001",
+        "DOC-PERF-001:p1",
+        "Query Latency",
+        "Inspect slow query traces in the performance dashboard.",
+    )
+    perf_doc_3 = _sample_kb_source(
+        "DOC-PERF-003",
+        "DOC-PERF-003:p1",
+        "Cache Tuning",
+        "Enable query caching for read-heavy workloads.",
+    )
+
+    def _grounding_fn(*, ticket: Any, sources: Any, related_sources: Any) -> dict[str, Any]:
+        del related_sources
+        if ticket["ticket_id"] == "T-ANSWERABLE-GATED":
+            return {
+                "claims": [],
+                "unsupported_points": ["Specific step not confirmed."],
+                "conflicting_points": [],
+                "confidence": 0.40,
+                "reason": "Insufficient grounding for answerable-but-gated ticket.",
+            }
+        first_passage = sources[0]["passage_id"]
+        return {
+            "claims": [
+                {
+                    "text": f"Guidance from {sources[0]['title']}.",
+                    "source_ids": [first_passage],
+                }
+            ],
+            "unsupported_points": [],
+            "conflicting_points": [],
+            "confidence": 0.95,
+            "reason": "Primary KB passage supports response.",
+        }
+
+    evaluator = RoutingPolicyEvaluator(policy, claim_grounding_fn=_grounding_fn)
+    skipped_retrieval = RetrievalResult(
+        status="skipped",
+        reason_code="low_confidence",
+        reason="Skipped retrieval below confidence threshold.",
+        sources=(),
+        eligible_candidate_count=0,
+        excluded_candidate_counts={},
+        minimum_similarity=MINIMUM_SIMILARITY,
+        embedding_model="gemini-embedding-001",
+        source_sha256="1" * 64,
+        metadata_manifest_sha256="2" * 64,
+    )
+
+    def _ready_retrieval(*docs: dict[str, Any]) -> RetrievalResult:
+        return RetrievalResult(
+            status="ready",
+            reason_code="sources_ready",
+            reason="Approved primary sources matched.",
+            sources=tuple(docs),
+            eligible_candidate_count=len(docs),
+            excluded_candidate_counts={},
+            minimum_similarity=MINIMUM_SIMILARITY,
+            embedding_model="gemini-embedding-001",
+            source_sha256="1" * 64,
+            metadata_manifest_sha256="2" * 64,
+        )
+
+    raw_tickets = [
+        {
+            "ticket_id": "T-SUBSET-PASS",
+            "channel": "email",
+            "subject": "API scopes",
+            "body": "How do I configure API key scopes?",
+            "labels": {
+                "intent": "api_key_issue",
+                "urgency": "medium",
+                "expected_route": "draft_for_review",
+                "answerable_from_docs": True,
+                "expected_doc_ids": ["DOC-API-002"],
+                "must_not_auto_respond": False,
+            },
+        },
+        {
+            "ticket_id": "T-EMPTY-GATED-PASS",
+            "channel": "chat",
+            "subject": "Unclear request",
+            "body": "Something is not working.",
+            "labels": {
+                "intent": "api_key_issue",
+                "urgency": "medium",
+                "expected_route": "escalate",
+                "answerable_from_docs": False,
+                "expected_doc_ids": [],
+                "must_not_auto_respond": False,
+            },
+        },
+        {
+            "ticket_id": "T-EMPTY-UNGATED-FAIL",
+            "channel": "email",
+            "subject": "SSO question",
+            "body": "Can you enable custom SSO?",
+            "labels": {
+                "intent": "api_key_issue",
+                "urgency": "medium",
+                "expected_route": "escalate",
+                "answerable_from_docs": False,
+                "expected_doc_ids": [],
+                "must_not_auto_respond": False,
+            },
+        },
+        {
+            "ticket_id": "T-PARTIAL-MISS",
+            "channel": "email",
+            "subject": "Slow queries",
+            "body": "How do I diagnose slow queries and cache?",
+            "labels": {
+                "intent": "api_key_issue",
+                "urgency": "medium",
+                "expected_route": "draft_for_review",
+                "answerable_from_docs": True,
+                "expected_doc_ids": ["DOC-PERF-001", "DOC-PERF-002"],
+                "must_not_auto_respond": False,
+            },
+        },
+        {
+            "ticket_id": "T-ANSWERABLE-GATED",
+            "channel": "email",
+            "subject": "Rotate API key",
+            "body": "How do I rotate API keys?",
+            "labels": {
+                "intent": "api_key_issue",
+                "urgency": "medium",
+                "expected_route": "draft_for_review",
+                "answerable_from_docs": True,
+                "expected_doc_ids": ["DOC-API-001"],
+                "must_not_auto_respond": False,
+            },
+        },
+    ]
+    configs = [
+        (0.95, _ready_retrieval(api_doc_1, api_doc_2)),
+        (0.541, skipped_retrieval),
+        (0.95, _ready_retrieval(auth_doc_2)),
+        (0.95, _ready_retrieval(perf_doc_1, perf_doc_3)),
+        (0.95, _ready_retrieval(api_doc_1)),
+    ]
+
+    db_path = tmp_path / "runtime.sqlite3"
+    output_dir = tmp_path / "outputs" / run_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    input_path = tmp_path / "tickets.json"
+    input_path.write_text(json.dumps(raw_tickets), encoding="utf-8")
+
+    connection = connect_runtime_database(db_path)
+    try:
+        create_processing_run(
+            connection,
+            run_id=run_id,
+            input_ref=str(input_path),
+            started_at="2026-11-10T12:00:00Z",
+            label=None,
+            output_dir=str(output_dir),
+        )
+        for index, (confidence, retrieval) in enumerate(configs):
+            _persist_ticket_outcome(
+                connection,
+                run_id=run_id,
+                input_index=index,
+                raw_ticket=raw_tickets[index],
+                classification=TicketClassification(
+                    intent="api_key_issue",
+                    urgency="medium",
+                    confidence=confidence,
+                    provider="gemini",
+                    model_name="gemini-decision-1",
+                    provider_status="classified",
+                ),
+                retrieval=retrieval,
+                evaluator=evaluator,
+                policy=policy,
+                policy_fingerprint=policy_fingerprint,
+                classifier_fingerprint=classifier_fingerprint,
+                settings=settings,
+                generator=OfflineDraftGenerationProvider(),
+            )
+        connection.commit()
+        write_run_exports(
+            connection,
+            run_id=run_id,
+            output_directory=output_dir,
+            input_records=raw_tickets,
+            input_path=input_path,
+            source_ref="external",
+        )
+        write_markdown_run_metrics(
+            connection,
+            run_id=run_id,
+            output_directory=output_dir,
+        )
+    finally:
+        connection.close()
+
+    metrics_md = (output_dir / "metrics.md").read_text(encoding="utf-8")
+    assert "| expected_doc_ids | 2 | 3 | 0 | 40.0% |" in metrics_md
+
+    report = json.loads((output_dir / "failure_report.json").read_text(encoding="utf-8"))
+    by_id = {item["ticket_id"]: item for item in report["tickets"]}
+    assert "T-SUBSET-PASS" not in by_id
+    assert by_id["T-EMPTY-GATED-PASS"]["failed_kpis"] == []
+    assert "expected_doc_ids" in by_id["T-EMPTY-UNGATED-FAIL"]["failed_kpis"]
+    assert "expected_doc_ids" in by_id["T-PARTIAL-MISS"]["failed_kpis"]
+    assert "DOC-PERF-001" in by_id["T-PARTIAL-MISS"]["evaluation"]["expected_doc_note"]
+    assert "partially retrieved" in by_id["T-PARTIAL-MISS"]["evaluation"]["expected_doc_note"]
+    assert "expected_doc_ids" in by_id["T-ANSWERABLE-GATED"]["failed_kpis"]
+
+    failure_md = (output_dir / "failure_report.md").read_text(encoding="utf-8")
+    assert "expected_doc_ids: [] -> ['DOC-AUTH-002']" in failure_md
+    assert "expected_doc_ids: ['DOC-PERF-001', 'DOC-PERF-002'] -> ['DOC-PERF-001', 'DOC-PERF-003']" in failure_md
+    assert "Expected doc(s) DOC-PERF-001 were partially retrieved" in failure_md
+    assert "expected_doc_ids: ['DOC-API-001'] -> []" in failure_md
 
 
 

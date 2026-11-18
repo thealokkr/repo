@@ -1388,7 +1388,6 @@ def test_grouped_pre_routing_checks_across_sqlite_exports_and_cli_progress(
     assert report_by_id["T-ELIGIBLE"]["stopped_at"] == "evaluation_only"
     assert report_by_id["T-ELIGIBLE"]["failed_kpis"] == [
         "urgency",
-        "expected_doc_ids",
     ]
     assert "failed_kpis" not in report_by_id["T-ELIGIBLE"]["evaluation"]
 

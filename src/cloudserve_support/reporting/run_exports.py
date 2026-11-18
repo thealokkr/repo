@@ -532,8 +532,13 @@ def _build_ticket_evaluation_summary(
         predicted_key = "route" if label_field == "expected_route" else label_field
         predicted_raw = generated.get(label_field) if generated is not None else None
         predicted_valid = _valid_label_value(label_field, predicted_raw, generated=True)
-        if label_field != "expected_doc_ids":
-            predicted[predicted_key] = predicted_raw if predicted_valid else None
+        predicted[predicted_key] = (
+            list(predicted_raw)
+            if label_field == "expected_doc_ids" and predicted_valid
+            else predicted_raw
+            if predicted_valid
+            else None
+        )
 
         if not expected_valid:
             continue
@@ -541,7 +546,7 @@ def _build_ticket_evaluation_summary(
             failed_kpis.append(FAILED_KPI_NAMES[label_field])
             continue
         if label_field == "expected_doc_ids":
-            is_match = set(expected_raw) == set(predicted_raw)
+            is_match = _expected_doc_ids_match(expected_raw, predicted_raw)
         elif label_field == "expected_route":
             is_match = EXPECTED_ROUTE_ALIASES.get(expected_raw, expected_raw) == predicted_raw
         else:
@@ -628,6 +633,13 @@ def _extract_cited_doc_ids(
     return sorted(cited_docs)
 
 
+def _expected_doc_ids_match(expected: list[str], predicted: list[str]) -> bool:
+    """Return True when empty expected docs match empty predictions or expected docs are subsumed."""
+    if not expected:
+        return len(predicted) == 0
+    return set(expected).issubset(set(predicted))
+
+
 def _expected_doc_note(
     *,
     expected_docs: list[str] | None,
@@ -636,7 +648,7 @@ def _expected_doc_note(
     draft_emitted: bool,
     failed_kpis: list[str],
 ) -> str | None:
-    """Note when expected docs were retrieved despite an exact-set or cited-doc mismatch."""
+    """Note when expected docs were retrieved despite an expected_doc_ids or cited-doc mismatch."""
     if "expected_doc_ids" not in failed_kpis or not expected_docs:
         return None
     retrieved_set = set(retrieved_doc_ids)
@@ -650,7 +662,7 @@ def _expected_doc_note(
             )
         return (
             f"Expected doc(s) {', '.join(expected_docs)} were retrieved in "
-            "retrieved_doc_ids despite the exact-set expected_doc_ids mismatch."
+            "retrieved_doc_ids despite the expected_doc_ids mismatch."
         )
     partial = [doc_id for doc_id in expected_docs if doc_id in retrieved_set]
     if partial:
@@ -661,7 +673,7 @@ def _expected_doc_note(
             )
         return (
             f"Expected doc(s) {', '.join(partial)} were partially retrieved in "
-            "retrieved_doc_ids despite the exact-set expected_doc_ids mismatch."
+            "retrieved_doc_ids despite the expected_doc_ids mismatch."
         )
     return None
 
@@ -1333,7 +1345,12 @@ def _format_kpi_mismatches(
         "urgency": (expected.get("urgency"), predicted.get("urgency")),
         "route": (expected.get("expected_route"), predicted.get("route")),
         "answerability": (expected.get("answerable_from_docs"), predicted.get("answerable_from_docs")),
-        "expected_doc_ids": (expected.get("expected_doc_ids"), predicted.get("retrieved_doc_ids")),
+        "expected_doc_ids": (
+            expected.get("expected_doc_ids"),
+            predicted["expected_doc_ids"]
+            if predicted.get("expected_doc_ids") is not None
+            else predicted.get("retrieved_doc_ids"),
+        ),
         "must_not_auto_respond": (
             expected.get("must_not_auto_respond"),
             predicted.get("must_not_auto_respond"),
@@ -1422,7 +1439,7 @@ def write_markdown_run_metrics(
             if not _valid_label_value(field, generated_value, generated=True):
                 continue
             if field == "expected_doc_ids":
-                is_match = set(provided_value) == set(generated_value)
+                is_match = _expected_doc_ids_match(provided_value, generated_value)
             else:
                 expected_value = EXPECTED_ROUTE_ALIASES.get(
                     provided_value, provided_value

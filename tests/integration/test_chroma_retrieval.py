@@ -219,23 +219,23 @@ def _temporary_chroma_retriever(
     )
 
 
-def test_real_chroma_caps_primary_articles_at_five(tmp_path: Path) -> None:
+def test_real_chroma_caps_primary_articles_at_three(tmp_path: Path) -> None:
     ticket = _operational_ticket("DEV-0017")
     query_text = f"{ticket.subject}\n{ticket.body}".strip()
     retriever = _temporary_chroma_retriever(tmp_path, query_text)
 
-    result = retriever.retrieve(ticket)
-
-    assert result.status == "ready", result.as_dict()
-    assert len(result.sources) == MAXIMUM_SOURCES == 5
-    assert [source["doc_id"] for source in result.sources] == [
-        "DOC-API-001",
-        "DOC-AUTH-001",
-        "DOC-AUTH-002",
-        "DOC-AUTH-004",
-        "DOC-DEPLOY-001",
-    ]
-    assert all(source["similarity"] >= MINIMUM_SIMILARITY for source in result.sources)
+    for result in (retriever.retrieve(ticket), retriever.retrieve_many([ticket])[0]):
+        assert result.status == "ready", result.as_dict()
+        assert len(result.sources) == MAXIMUM_SOURCES == 3
+        assert [source["doc_id"] for source in result.sources] == [
+            "DOC-API-001",
+            "DOC-AUTH-001",
+            "DOC-AUTH-002",
+        ]
+        assert [source["similarity"] for source in result.sources] == sorted(
+            (source["similarity"] for source in result.sources), reverse=True
+        )
+        assert all(source["similarity"] >= MINIMUM_SIMILARITY for source in result.sources)
 
 
 def test_real_chroma_returns_whole_articles_and_filtered_related_docs() -> None:
@@ -583,3 +583,100 @@ def test_retrieval_diagnostics_remain_result_schema_compatible() -> None:
     retrieval_schema = schema["properties"]["routing"]["properties"]["retrieval"]
 
     jsonschema.validate(result.as_dict(), retrieval_schema)
+
+
+def test_minimum_similarity_floor_excludes_candidates_just_below_threshold(
+    tmp_path: Path,
+) -> None:
+    """Verify real Chroma cosine candidates just below MINIMUM_SIMILARITY are excluded."""
+    assert MINIMUM_SIMILARITY == 0.57
+    ticket = _operational_ticket("DEV-0017")
+    query_text = f"{ticket.subject}\n{ticket.body}".strip()
+
+    below_sim = MINIMUM_SIMILARITY - 0.01
+    below_vec = [0.0] * EMBEDDING_DIMENSIONS
+    below_vec[0] = below_sim
+    below_vec[EMBEDDING_DIMENSIONS - 1] = (1.0 - below_sim**2) ** 0.5
+
+    above_sim = MINIMUM_SIMILARITY + 0.01
+    above_vec = [0.0] * EMBEDDING_DIMENSIONS
+    above_vec[0] = above_sim
+    above_vec[EMBEDDING_DIMENSIONS - 1] = (1.0 - above_sim**2) ** 0.5
+
+    articles, source_sha256 = load_kb_articles(DEFAULT_SOURCE_PATH)
+    metadata_manifest, metadata_by_id, metadata_sha256 = load_kb_metadata_manifest(
+        DEFAULT_METADATA_PATH
+    )
+    records = build_passage_records(
+        articles,
+        metadata_by_id,
+        metadata_owner=metadata_manifest["metadata_owner"],
+        metadata_source=metadata_manifest["metadata_source"],
+        review_interval_days=metadata_manifest["review_interval_days"],
+    )
+    index_path = tmp_path / "index"
+    index_path.mkdir(parents=True)
+    (index_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "collection": COLLECTION_NAME,
+                "source_path": "data/kb/documentation.json",
+                "source_sha256": source_sha256,
+                "metadata_manifest_path": "data/kb/metadata_manifest.json",
+                "metadata_manifest_sha256": metadata_sha256,
+                "passage_records_sha256": passage_records_sha256(records),
+                "chunker_version": CHUNKER_VERSION,
+                "embedding_provider": "gemini",
+                "embedding_model": "gemini-embedding-001",
+                "embedding_dimensions": EMBEDDING_DIMENSIONS,
+                "distance_metric": "cosine",
+                "article_count": len(articles),
+                "passage_count": len(records),
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = chromadb.PersistentClient(path=str(index_path / "chroma"))
+    collection = client.create_collection(
+        COLLECTION_NAME,
+        metadata={"hnsw:space": "cosine"},
+        embedding_function=None,
+    )
+    vectors = []
+    for index, record in enumerate(records):
+        vector = [0.0] * EMBEDDING_DIMENSIONS
+        vector[0 if record["metadata"]["doc_id"] == "DOC-AUTH-001" else index + 1] = 1.0
+        vectors.append(vector)
+    collection.add(
+        ids=[record["id"] for record in records],
+        documents=[record["document"] for record in records],
+        metadatas=[record["metadata"] for record in records],
+        embeddings=vectors,
+    )
+
+    def _run_with_vector(vec: list[float]) -> Any:
+        return KnowledgeRetriever(
+            Settings(
+                gemini_api_key="test-key",
+                embedding_model="gemini-embedding-001",
+                llm_model="gemini-3.8-flash",
+            ),
+            index_path=index_path,
+            embedding_client=PackagedArticleEmbeddings({query_text: vec}),
+            today=date(2026, 11, 10),
+        ).retrieve(ticket)
+
+    below_result = _run_with_vector(below_vec)
+    assert below_result.status == "no_hit"
+    assert below_result.reason_code == "below_relevance_threshold"
+    assert below_result.sources == ()
+    assert below_result.minimum_similarity == MINIMUM_SIMILARITY
+    assert below_result.excluded_candidate_counts["below_relevance_threshold"] == 27
+
+    above_result = _run_with_vector(above_vec)
+    assert above_result.status == "ready"
+    assert above_result.reason_code == "relevant_sources_found"
+    assert [source["doc_id"] for source in above_result.sources] == ["DOC-AUTH-001"]
+    assert above_result.excluded_candidate_counts["below_relevance_threshold"] == 26
+

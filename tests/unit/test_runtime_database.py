@@ -966,3 +966,357 @@ def test_output_schemas_reject_nested_unsafe_run_ids_and_non_uuid_event_id(tmp_p
             schema_filename="decision-log.schema.json",
             schemas=schemas,
         )
+
+
+def test_ticket_label_comparison_gates_expected_doc_ids_on_evidence_ready(
+    tmp_path: Path,
+) -> None:
+    """AC-1 & AC-2: gate expected_doc_ids on evidence_ready while preserving sources."""
+    run_id = "c" * 32
+    policy = json.loads(TEST_ROUTING_POLICY_PATH.read_text(encoding="utf-8"))
+    policy_fingerprint = fingerprint_policy_file(TEST_ROUTING_POLICY_PATH)
+    classifier_fingerprint = fingerprint_classifier_model("gemini", "gemini-decision-1")
+    settings = Settings.from_env({"DRAFT_GENERATION_PROVIDER": "offline"})
+    generator = OfflineDraftGenerationProvider()
+
+    doc_1 = _sample_kb_source(
+        "DOC-API-001",
+        "DOC-API-001:p1",
+        "API Keys",
+        "Rotate API keys from the dashboard settings page.",
+    )
+    doc_2 = _sample_kb_source(
+        "DOC-API-002",
+        "DOC-API-002:p1",
+        "API Rate Limits",
+        "Check API rate limits in workspace settings.",
+    )
+    related_doc = _sample_kb_source(
+        "DOC-SEC-001",
+        "DOC-SEC-001:p1",
+        "Token Security",
+        "Store API keys in a secrets manager.",
+    )
+
+    raw_tickets = [
+        {
+            "ticket_id": "T-NOT-READY",
+            "channel": "email",
+            "subject": "Rotate API key and custom SLA",
+            "body": "How do I rotate API keys and get a custom SLA?",
+        },
+        {
+            "ticket_id": "T-READY",
+            "channel": "email",
+            "subject": "Rotate API key",
+            "body": "How do I rotate API keys from the dashboard settings page?",
+        },
+    ]
+    classification = TicketClassification(
+        intent="api_key_issue",
+        urgency="medium",
+        confidence=0.92,
+        provider="gemini",
+        model_name="gemini-decision-1",
+        provider_status="classified",
+    )
+
+    def fake_grounding(*, ticket: dict[str, Any], sources: tuple[Any, ...], related_sources: tuple[Any, ...]) -> dict[str, Any]:
+        if ticket["ticket_id"] == "T-NOT-READY":
+            return {
+                "claims": [],
+                "unsupported_points": ["Custom SLA terms are not in the KB."],
+                "conflicting_points": [],
+                "confidence": 0.90,
+                "reason": "Candidate docs do not answer custom SLA question.",
+            }
+        return {
+            "claims": [
+                {
+                    "text": "Rotate API keys from the dashboard settings page.",
+                    "source_ids": ["DOC-API-001:p1"],
+                }
+            ],
+            "unsupported_points": [],
+            "conflicting_points": [],
+            "confidence": 0.96,
+            "reason": "Primary KB passages support the request.",
+        }
+
+    evaluator = RoutingPolicyEvaluator(policy, claim_grounding_fn=fake_grounding)
+    retrievals = [
+        RetrievalResult(
+            status="ready",
+            reason_code="sources_ready",
+            reason="Candidate primary sources matched.",
+            sources=(doc_1, doc_2),
+            related_sources=(),
+            eligible_candidate_count=2,
+            excluded_candidate_counts={},
+            minimum_similarity=MINIMUM_SIMILARITY,
+            embedding_model="gemini-embedding-001",
+            source_sha256="1" * 64,
+            metadata_manifest_sha256="2" * 64,
+        ),
+        RetrievalResult(
+            status="ready",
+            reason_code="sources_ready",
+            reason="Approved primary and related sources matched.",
+            sources=(doc_2, doc_1),
+            related_sources=(related_doc,),
+            eligible_candidate_count=2,
+            excluded_candidate_counts={},
+            minimum_similarity=MINIMUM_SIMILARITY,
+            embedding_model="gemini-embedding-001",
+            source_sha256="1" * 64,
+            metadata_manifest_sha256="2" * 64,
+        ),
+    ]
+
+    db_path = tmp_path / "runtime.sqlite3"
+    output_dir = tmp_path / "outputs" / run_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    input_path = tmp_path / "tickets.json"
+    input_path.write_text(json.dumps(raw_tickets), encoding="utf-8")
+
+    connection = connect_runtime_database(db_path)
+    try:
+        create_processing_run(
+            connection,
+            run_id=run_id,
+            input_ref=str(input_path),
+            started_at="2026-11-10T12:00:00Z",
+            label=None,
+            output_dir=str(output_dir),
+        )
+        for index, (raw, retrieval) in enumerate(zip(raw_tickets, retrievals, strict=True)):
+            ticket = normalize_ticket_record(raw, input_index=index)
+            policy_eval = evaluator.evaluate(
+                ticket=ticket,
+                classification=classification.as_dict(),
+                retrieval=retrieval,
+            )
+            decision = RoutingPolicyEvaluator.to_routing_decision(policy_eval)
+            outcome = build_ticket_outcome(
+                run_id=run_id,
+                input_index=index,
+                ticket=ticket,
+                classification=classification,
+                retrieval=retrieval,
+                decision=decision,
+                policy_evaluation=policy_eval,
+                policy=policy,
+                policy_file_fingerprint=policy_fingerprint,
+                classifier_implementation_fingerprint=classifier_fingerprint,
+                settings=settings,
+                generator=generator,
+                issues=[],
+                duplicate_ticket_id=False,
+            )
+            outcome["processing_duration_seconds"] = 0.05
+            outcome["processing_latency_seconds"] = 0.05
+            create_ticket_audit_records(
+                connection,
+                run_id=run_id,
+                storage_ticket_id=ticket.ticket_id,
+                channel=ticket.channel,
+                received_at=None,
+                customer_tier=None,
+                language_fluency=None,
+                context={},
+                processing_status="completed",
+                error_code=None,
+                error_message=None,
+                event_id=f"{index + 10:032x}",
+                occurred_at="2026-11-10T12:00:01Z",
+                event_type="ticket_completed",
+                input_summary=ticket.body,
+                action_taken=outcome["route"],
+                reason=outcome["reason"],
+                result_payload={
+                    "input_index": index,
+                    "ticket_id": ticket.ticket_id,
+                    "sources": outcome["sources"],
+                    "result": outcome,
+                },
+                guardrail_results=outcome["guardrails"],
+            )
+        connection.commit()
+
+        comparison_rows = {
+            row["ticket_id"]: row
+            for row in connection.execute(
+                "SELECT ticket_id, generated_labels_json, generated_labels_status, generated_labels_reason "
+                "FROM ticket_label_comparison WHERE run_id = ?",
+                (run_id,),
+            ).fetchall()
+        }
+        assert (
+            comparison_rows["T-NOT-READY"]["generated_labels_status"] == "available"
+        ), comparison_rows["T-NOT-READY"]["generated_labels_reason"]
+        not_ready_labels = json.loads(comparison_rows["T-NOT-READY"]["generated_labels_json"])
+        assert not_ready_labels["answerable_from_docs"] is False
+        assert not_ready_labels["expected_doc_ids"] == []
+
+        assert comparison_rows["T-READY"]["generated_labels_status"] == "available"
+        ready_labels = json.loads(comparison_rows["T-READY"]["generated_labels_json"])
+        assert ready_labels["answerable_from_docs"] is True
+        assert ready_labels["expected_doc_ids"] == ["DOC-API-001", "DOC-API-002"]
+
+        audit_sources_raw = connection.execute(
+            "SELECT sources_json FROM audit_events WHERE run_id = ? AND ticket_id = ?",
+            (run_id, "T-NOT-READY"),
+        ).fetchone()["sources_json"]
+        assert [src["doc_id"] for src in json.loads(audit_sources_raw)] == [
+            "DOC-API-001",
+            "DOC-API-002",
+        ]
+
+        write_run_exports(
+            connection,
+            run_id=run_id,
+            output_directory=output_dir,
+            input_records=raw_tickets,
+            input_path=input_path,
+            source_ref="external",
+        )
+    finally:
+        connection.close()
+
+    exported = {
+        row["ticket_id"]: row
+        for row in (
+            json.loads(line)
+            for line in (output_dir / "results.jsonl").read_text(encoding="utf-8").splitlines()
+        )
+    }
+    assert exported["T-NOT-READY"]["predicted_doc_ids"] == []
+    assert [src["doc_id"] for src in exported["T-NOT-READY"]["sources"]] == [
+        "DOC-API-001",
+        "DOC-API-002",
+    ]
+    assert exported["T-READY"]["predicted_doc_ids"] == ["DOC-API-001", "DOC-API-002"]
+
+
+def test_initialize_runtime_database_migrates_ticket_label_comparison_non_destructively(
+    tmp_path: Path,
+) -> None:
+    """AC-3: Re-initializing an existing DB preserves rows and applies the evidence_ready gate."""
+    db_path = tmp_path / "legacy-runtime.sqlite3"
+    connection = connect_runtime_database(db_path)
+    try:
+        create_processing_run(
+            connection,
+            run_id="legacy-run",
+            input_ref="tickets.json",
+            started_at="2026-11-10T12:00:00Z",
+            label=None,
+            output_dir="outputs/legacy-run",
+        )
+        doc_1 = _sample_kb_source("DOC-API-001", "DOC-API-001:p1", "API 1", "Body 1.", source_kind="primary")
+        doc_2 = _sample_kb_source("DOC-API-002", "DOC-API-002:p1", "API 2", "Body 2.", source_kind="primary")
+        related = _sample_kb_source("DOC-SEC-001", "DOC-SEC-001:p1", "Sec 1", "Body 3.", source_kind="related")
+        for index, (ticket_id, evidence_ready, route, sources) in enumerate(
+            [
+                ("T-LEGACY-FALSE", False, "escalate", [doc_1, doc_2]),
+                ("T-LEGACY-TRUE", True, "draft_for_review", [doc_2, doc_1, related]),
+            ]
+        ):
+            create_ticket_audit_records(
+                connection,
+                run_id="legacy-run",
+                storage_ticket_id=ticket_id,
+                channel="email",
+                received_at=None,
+                customer_tier=None,
+                language_fluency=None,
+                context={},
+                processing_status="completed",
+                error_code=None,
+                error_message=None,
+                event_id=f"legacy-event-{index}",
+                occurred_at="2026-11-10T12:00:01Z",
+                event_type="ticket_completed",
+                input_summary="Question",
+                action_taken=route,
+                reason="Legacy row.",
+                result_payload={
+                    "input_index": index,
+                    "ticket_id": ticket_id,
+                    "result": {
+                        "status": "completed",
+                        "route": route,
+                        "classification": {
+                            "provider_status": "classified",
+                            "intent": "api_key_issue",
+                            "urgency": "medium",
+                        },
+                        "routing": {"evidence_ready": evidence_ready, "protected_case": False},
+                        "sources": sources,
+                    },
+                },
+            )
+        # Simulate a pre-updated view that lacked the evidence_ready gate.
+        connection.execute("DROP VIEW IF EXISTS ticket_label_comparison")
+        connection.execute(
+            """
+            CREATE VIEW ticket_label_comparison AS
+            SELECT ticket.run_id,
+                   ticket.ticket_id,
+                   ticket.input_labels_json,
+                   json_object(
+                       'intent', json_extract(event.event_payload_json, '$.result.classification.intent'),
+                       'urgency', json_extract(event.event_payload_json, '$.result.classification.urgency'),
+                       'expected_route', json_extract(event.event_payload_json, '$.result.route'),
+                       'answerable_from_docs', json(CASE
+                           WHEN json_extract(event.event_payload_json, '$.result.routing.evidence_ready') = 1
+                           THEN 'true' ELSE 'false' END),
+                       'expected_doc_ids', json(COALESCE((
+                           SELECT json_group_array(doc_id)
+                           FROM (
+                               SELECT DISTINCT json_extract(source.value, '$.doc_id') AS doc_id
+                               FROM json_each(event.event_payload_json, '$.result.sources') AS source
+                               WHERE COALESCE(json_extract(source.value, '$.source_kind'), 'primary') = 'primary'
+                               ORDER BY doc_id
+                           )
+                       ), '[]')),
+                       'must_not_auto_respond', json(CASE
+                           WHEN json_extract(event.event_payload_json, '$.result.routing.protected_case') = 1
+                           THEN 'true' ELSE 'false' END)
+                   ) AS generated_labels_json,
+                   'available' AS generated_labels_status,
+                   NULL AS generated_labels_reason
+            FROM ticket_runs AS ticket
+            JOIN audit_events AS event
+              ON event.run_id = ticket.run_id
+             AND event.ticket_id = ticket.ticket_id
+            """
+        )
+        pre_migration_false = json.loads(
+            connection.execute(
+                "SELECT generated_labels_json FROM ticket_label_comparison WHERE ticket_id = 'T-LEGACY-FALSE'"
+            ).fetchone()["generated_labels_json"]
+        )
+        assert pre_migration_false["expected_doc_ids"] == ["DOC-API-001", "DOC-API-002"]
+        connection.commit()
+    finally:
+        connection.close()
+
+    initialize_runtime_database(db_path)
+    migrated = connect_runtime_database(db_path)
+    try:
+        assert migrated.execute("SELECT COUNT(*) FROM processing_runs").fetchone()[0] == 1
+        assert migrated.execute("SELECT COUNT(*) FROM ticket_runs").fetchone()[0] == 2
+        assert migrated.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == 2
+
+        rows = {
+            row["ticket_id"]: json.loads(row["generated_labels_json"])
+            for row in migrated.execute(
+                "SELECT ticket_id, generated_labels_json FROM ticket_label_comparison"
+            ).fetchall()
+        }
+        assert rows["T-LEGACY-FALSE"]["expected_doc_ids"] == []
+        assert rows["T-LEGACY-TRUE"]["expected_doc_ids"] == ["DOC-API-001", "DOC-API-002"]
+    finally:
+        migrated.close()
+

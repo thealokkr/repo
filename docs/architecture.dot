@@ -1,0 +1,88 @@
+digraph CloudServeArchitecture {
+  graph [
+    rankdir=TB,
+    bgcolor="#f8fafc",
+    pad=0.4,
+    nodesep=0.7,
+    ranksep=0.9,
+    splines=polyline,
+    fontname="Arial",
+    fontsize=20,
+    label="CloudServe Support Automation — Solution Architecture",
+    labelloc=t,
+    labeljust=l,
+    fontcolor="#0f172a"
+  ];
+  node [
+    style="filled",
+    fontname="Arial",
+    fontsize=12,
+    color="#cbd5e1",
+    fillcolor="#ffffff",
+    fontcolor="#0f172a",
+    margin="0.22,0.16"
+  ];
+  edge [
+    fontname="Arial",
+    fontsize=10,
+    color="#64748b",
+    fontcolor="#475569",
+    arrowsize=0.8
+  ];
+
+  tickets [
+    label="Ticket batch\nJSON input",
+    shape=folder,
+    fillcolor="#eff6ff",
+    color="#93c5fd"
+  ];
+  pipeline [
+    label="SUPPORT AUTOMATION PIPELINE\n\nNormalize + validate tickets\nBatch classification → semantic KB retrieval\nRouting + guardrails → draft or escalate\nPersist decisions + export run reports",
+    shape=box,
+    style="rounded,filled",
+    color="#60a5fa",
+    fillcolor="#eff6ff",
+    penwidth=2,
+    fontsize=13,
+    width=4.4,
+    height=2.0
+  ];
+  agent [
+    label="Support agent\nReviews every draft\nHandles escalations",
+    shape=component,
+    fillcolor="#f0fdf4",
+    color="#86efac"
+  ];
+  database [
+    label="DATA STORES\n\nSQLite runtime database\nRun, ticket + audit history\n\nChroma vector index\nApproved KB articles + metadata",
+    shape=cylinder,
+    fillcolor="#f0fdf4",
+    color="#34d399",
+    penwidth=1.5,
+    width=3.0,
+    height=1.8
+  ];
+  llm [
+    label="LLM ENTITY — GOOGLE GEMINI\n\nDecisions API: gemini-decision-1\nEmbeddings: gemini-embedding-001\nGrounding + draft generation:\ngemini-3.8-flash",
+    shape=ellipse,
+    fillcolor="#faf5ff",
+    color="#c084fc",
+    penwidth=1.5,
+    width=3.5,
+    height=1.8
+  ];
+  kb [
+    label="Packaged support KB\nArticles + eligibility metadata",
+    shape=folder,
+    fillcolor="#fffbeb",
+    color="#fcd34d"
+  ];
+
+  { rank=same; tickets; pipeline; agent; }
+  { rank=same; kb; database; llm; }
+  tickets -> pipeline [label="ticket records"];
+  pipeline -> agent [label="drafts for review / escalations"];
+  pipeline -> database [label="read sources + persist audit trail"];
+  pipeline -> llm [label="classification · embeddings · grounding · drafts"];
+  kb -> database [label="ingest + embed"];
+}

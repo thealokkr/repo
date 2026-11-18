@@ -32,8 +32,8 @@ DEFAULT_METADATA_PATH = REPO_ROOT / "data" / "kb" / "metadata_manifest.json"
 DEFAULT_INDEX_PATH = REPO_ROOT / "data" / "index"
 COLLECTION_NAME = "cloudserve_kb"
 EMBEDDING_DIMENSIONS = 768
-MINIMUM_SIMILARITY = 0.45
-MAXIMUM_SOURCES = 5
+MINIMUM_SIMILARITY = 0.57
+MAXIMUM_SOURCES = 3
 QUERY_EMBEDDING_TIMEOUT_SECONDS = 15.0
 QUERY_EMBEDDING_MAX_RETRIES = 0
 # Initial measured five-ticket settings; the downstream 5/50 CLI acceptance verifies them.
@@ -229,7 +229,7 @@ class KnowledgeRetriever:
             raise ValueError("Chroma passage records do not match the current source corpus.")
 
     def retrieve(self, ticket: CanonicalTicket) -> RetrievalResult:
-        """Return up to five ranked articles or an explicit safe no-evidence result."""
+        """Return up to three ranked articles or an explicit safe no-evidence result."""
         if self.unavailable_reason:
             return self._empty_result("unavailable", *self.unavailable_reason)
 

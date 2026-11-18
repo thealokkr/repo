@@ -20,6 +20,12 @@ A self-contained, CLI-first support-ticket automation capstone.
 
 See [AGENTS.md](AGENTS.md) for repository conventions, data handling rules, and scope.
 
+## Solution architecture
+
+![CloudServe Support Automation architecture](docs/architecture.svg)
+
+The diagram source is [docs/architecture.dot](docs/architecture.dot).
+
 ## Python and Chroma setup
 
 The project uses Python 3.13 and `uv`. The Chroma dependency is declared in `pyproject.toml` and pinned by `uv.lock`.
