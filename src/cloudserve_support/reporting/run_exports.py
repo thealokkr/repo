@@ -423,6 +423,16 @@ def _build_failure_report(
         )
         for result in results
     )
+    skip_draft = any(
+        isinstance(result.get("generation"), dict)
+        and result["generation"].get("skip_draft") is True
+        for result in results
+    )
+    skip_draft_review = any(
+        isinstance(result.get("generation"), dict)
+        and result["generation"].get("skip_draft_review") is True
+        for result in results
+    )
     return {
         "schema_version": 1,
         "run": {
@@ -436,6 +446,8 @@ def _build_failure_report(
             "escalated": route_counts["escalate"],
             "degraded": route_counts["degrade"],
             "blocked_by_guardrails": blocked_by_guardrails,
+            "skip_draft": skip_draft,
+            "skip_draft_review": skip_draft_review,
             "operational_failure_count": operational_failure_count,
             "kpi_failed_record_count": kpi_failed_record_count,
             "reported_ticket_count": len(tickets),
@@ -860,20 +872,6 @@ def _build_after_drafting_section(
         (check["name"] for check in ordered_checks if check["status"] == "failed"),
         None,
     )
-    pre_draft_claim_grounding_passed = any(
-        check.get("name") == "claim_grounding_check" and check.get("status") == "passed"
-        for check in routing_checks
-    )
-    distinct_note = (
-        "Pre-draft routing claim_grounding_check passed on policy-verified claims, "
-        "but post-draft deterministic citation_grounding blocked the generated draft "
-        "because its clauses did not meet grounding requirements."
-        if gen_status == "generated"
-        and blocking_check == "citation_grounding"
-        and pre_draft_claim_grounding_passed
-        else None
-    )
-
     if gen_status == "generated" and post_draft_diagnostics is not None:
         withheld_claims = list(post_draft_diagnostics.get("withheld_claims") or [])
         unsupported_points = list(post_draft_diagnostics.get("unsupported_points") or [])
@@ -894,6 +892,31 @@ def _build_after_drafting_section(
         conflicting_points = []
         failed_claims = []
         diagnostics_note = None
+
+    pre_draft_claim_grounding_passed = any(
+        check.get("name") == "claim_grounding_check" and check.get("status") == "passed"
+        for check in routing_checks
+    )
+    uses_noul = any(
+        isinstance(item, dict) and item.get("noul") is not None
+        for item in failed_claims
+    )
+    if (
+        gen_status == "generated"
+        and blocking_check == "citation_grounding"
+        and pre_draft_claim_grounding_passed
+    ):
+        distinct_note = (
+            "Pre-draft routing claim_grounding_check passed, "
+            "but post-draft semantic citation_grounding blocked the generated draft "
+            "because its claims did not pass Decisions Noul verification."
+            if uses_noul
+            else "Pre-draft routing claim_grounding_check passed on policy-verified claims, "
+            "but post-draft deterministic citation_grounding blocked the generated draft "
+            "because its clauses did not meet grounding requirements."
+        )
+    else:
+        distinct_note = None
 
     return {
         "status": "failed" if blocking_check is not None else "passed",
@@ -1089,8 +1112,16 @@ def _format_ticket_main_reason(ticket: dict[str, Any]) -> str:
     if stopped_at == "after_drafting":
         blocking_check = ticket.get("after_drafting", {}).get("blocking_check")
         if blocking_check == "citation_grounding":
-            rejected = len(ticket.get("after_drafting", {}).get("failed_claims") or [])
-            return f"citation_grounding ({rejected} rejected clauses)" if rejected else "citation_grounding"
+            failed_claims = ticket.get("after_drafting", {}).get("failed_claims") or []
+            rejected = len(failed_claims)
+            if not rejected:
+                return "citation_grounding"
+            uses_noul = any(
+                isinstance(item, dict) and item.get("noul") is not None
+                for item in failed_claims
+            )
+            label = "rejected claims" if uses_noul else "rejected clauses"
+            return f"citation_grounding ({rejected} {label})"
         return blocking_check or ticket.get("final_reason") or "post-draft block"
     return ticket.get("final_reason") or "unknown"
 
@@ -1232,7 +1263,29 @@ def _render_after_drafting_lines(ticket: dict[str, Any]) -> list[str]:
     if blocking_check == "citation_grounding":
         failed_claims = after.get("failed_claims") or []
         cited_docs = (ticket.get("evaluation") or {}).get("predicted", {}).get("cited_doc_ids") or []
-        parts = [f"{len(failed_claims)} rejected clause(s)"]
+        uses_noul = any(
+            isinstance(item, dict) and item.get("noul") is not None
+            for item in failed_claims
+        )
+        parts = [f"{len(failed_claims)} rejected {'claim(s)' if uses_noul else 'clause(s)'}"]
+        noul_values = [
+            f"{item['noul']:.2f}"
+            for item in failed_claims
+            if isinstance(item, dict) and isinstance(item.get("noul"), (int, float))
+        ]
+        if noul_values:
+            parts.append(f"noul={', '.join(noul_values)}")
+        if uses_noul:
+            first_reason = next(
+                (
+                    str(item["failure_reason"])
+                    for item in failed_claims
+                    if isinstance(item, dict) and item.get("failure_reason")
+                ),
+                None,
+            )
+            if first_reason:
+                parts.append(first_reason)
         if check and check.get("minimum_ratio") is not None:
             parts.append(f"minimum_ratio={check['minimum_ratio']}")
         if cited_docs:

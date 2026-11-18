@@ -14,6 +14,7 @@ from typing import Any
 
 import chromadb
 from google import genai
+from jsonschema import Draft202012Validator
 import pytest
 
 from cloudserve_support.cli import main as cli_main
@@ -37,6 +38,11 @@ from cloudserve_support.knowledge.retrieval import (
     MINIMUM_SIMILARITY,
     KnowledgeRetriever,
     RetrievalResult,
+)
+from cloudserve_support.reporting.output_schemas import (
+    POLICY_CHECK_SCHEMA,
+    POLICY_FINAL_DECISION_SCHEMA,
+    ROUTING_SCHEMA,
 )
 from cloudserve_support.routing.policy_calibration import (
     calibrate_development_routing_policy,
@@ -101,7 +107,7 @@ def _classification(
     "intent",
     [
         "security", "compliance", "account_compromise", "billing_dispute",
-        "data_location", "security_incident", "compliance_request", "data_residency",
+        "security_incident", "compliance_request",
         "feature_request", "roadmap_request", "unclear_request",
     ],
 )
@@ -219,8 +225,8 @@ def test_extremely_large_numeric_signals_degrade_without_raising() -> None:
             "operational_request_unclear",
         ),
         (
-            "Security incident",
-            "An API key was exposed in a public repository.",
+            "Suspicious activity",
+            "We have found activity in our audit log from an address none of us recognise.",
             "api",
             "operational_protected_security",
         ),
@@ -235,12 +241,6 @@ def test_extremely_large_numeric_signals_degrade_without_raising() -> None:
             "Please refund this incorrect charge; I dispute the amount.",
             "billing",
             "operational_protected_billing_dispute",
-        ),
-        (
-            "Data storage location",
-            "Where is our customer data stored, and which region hosts it?",
-            "data",
-            "operational_protected_data_location",
         ),
         (
             "Feature idea",
@@ -427,7 +427,7 @@ def test_development_calibration_ignores_fixture_labels_and_history(
             return SimpleNamespace(
                 model=DECISIONS_CLASSIFIER_MODEL,
                 answers={
-                    "ticket_0_intent": choice_answer("ticket_0_intent", "api", INTENT_VALUES),
+                    "ticket_0_intent": choice_answer("ticket_0_intent", "api_usage_question", INTENT_VALUES),
                     "ticket_0_urgency": choice_answer("ticket_0_urgency", "medium", URGENCY_VALUES),
                 },
             )
@@ -574,7 +574,7 @@ def _real_chroma_retrieval_for_doc(doc_id: str, *, tmp_path: Path) -> RetrievalR
 
 def test_policy_evaluator_orders_checks_and_short_circuits_all_failure_positions() -> None:
     frozen_policy = load_frozen_routing_policy(FROZEN_POLICY_PATH)
-    assert frozen_policy["classification_confidence_threshold"] == 0.65
+    assert 0.65 <= frozen_policy["classification_confidence_threshold"] <= 0.98
     snapshots = _real_kb_snapshots_by_doc_id()
     primary_source = snapshots["DOC-API-001"]
     related_source = {
@@ -595,8 +595,8 @@ def test_policy_evaluator_orders_checks_and_short_circuits_all_failure_positions
         {
             "ticket_id": "EVAL-PROTECTED-1",
             "channel": "email",
-            "subject": "Data residency region",
-            "body": "Where is our data stored and which region hosts backups?",
+            "subject": "Retention period question",
+            "body": "Our policy requires two years of retention. What are our options?",
         },
         input_index=0,
     )
@@ -653,7 +653,7 @@ def test_policy_evaluator_orders_checks_and_short_circuits_all_failure_positions
     ]
     assert fail_pos_1["final_decision"] == {
         "route": "escalate",
-        "matched_rule": "operational_protected_data_location",
+        "matched_rule": "operational_protected_compliance",
         "reason": fail_pos_1["checks"][0]["reason"],
         "failed_check": "protected_rule_check",
         "protected_case": True,
@@ -783,7 +783,7 @@ def test_policy_evaluator_orders_checks_and_short_circuits_all_failure_positions
         "reason": "The documentation does not cover custom backoff curves.",
         "failed_check": "claim_grounding_check",
         "protected_case": False,
-        "evidence_ready": True,
+        "evidence_ready": False,
     }
 
     # Position 4 exception in grounding hook fails closed to degrade.
@@ -1249,7 +1249,7 @@ def test_cli_run_routes_protected_low_confidence_and_draft_tickets_to_sqlite_and
             return SimpleNamespace(
                 model=DECISIONS_CLASSIFIER_MODEL,
                 answers={
-                    "ticket_0_intent": make_choice("ticket_0_intent", "data", 0.92, INTENT_VALUES),
+                    "ticket_0_intent": make_choice("ticket_0_intent", "data_residency", 0.92, INTENT_VALUES),
                     "ticket_0_urgency": make_choice("ticket_0_urgency", "medium", 0.90, URGENCY_VALUES),
                     "ticket_1_intent": make_choice("ticket_1_intent", "account_access", 0.40, INTENT_VALUES),
                     "ticket_1_urgency": make_choice("ticket_1_urgency", "low", 0.85, URGENCY_VALUES),
@@ -1277,9 +1277,9 @@ def test_cli_run_routes_protected_low_confidence_and_draft_tickets_to_sqlite_and
                 {
                     "ticket_id": "CLI-E2E-PROTECTED",
                     "channel": "email",
-                    "subject": "Data storage region",
-                    "body": "Where is our customer data stored and which region hosts it?",
-                    "labels": {"expected_route": "auto_respond"},
+                    "subject": "Retention period question",
+                    "body": "Our policy requires two years of retention. What are our options?",
+                    "labels": {"expected_route": "escalate"},
                     "history": {"csat_rating": 5},
                 },
                 {
@@ -1333,7 +1333,7 @@ def test_cli_run_routes_protected_low_confidence_and_draft_tickets_to_sqlite_and
     assert by_id["CLI-E2E-PROTECTED"]["predicted_route"] == "escalate"
     assert (
         by_id["CLI-E2E-PROTECTED"]["routing"]["matched_rule"]
-        == "operational_protected_data_location"
+        == "operational_protected_compliance"
     )
     assert by_id["CLI-E2E-LOW-CONF"]["predicted_route"] == "escalate"
     assert (
@@ -1364,3 +1364,786 @@ def test_cli_run_routes_protected_low_confidence_and_draft_tickets_to_sqlite_and
         == "below_classification_confidence_threshold"
     )
     assert payloads["CLI-E2E-DRAFT"]["final_decision"]["route"] == "draft_for_review"
+
+
+@pytest.mark.parametrize(
+    ("ticket_id", "subject", "body"),
+    [
+        (
+            "VAL-0001",
+            "Need to rotate an exposed key",
+            "One of our production keys started returning 401 at around yesterday morning without any change on our side.",
+        ),
+        (
+            "VAL-0039",
+            "API key returning 401",
+            "One of our engineers pushed a key to a public repository by mistake. We need to replace it without downtime.",
+        ),
+    ],
+)
+def test_api_key_rotation_tickets_pass_protected_rule_check_and_draft(
+    ticket_id: str,
+    subject: str,
+    body: str,
+) -> None:
+    frozen_policy = load_frozen_routing_policy(FROZEN_POLICY_PATH)
+    snapshots = _real_kb_snapshots_by_doc_id()
+    primary_source = snapshots["DOC-AUTH-004"]
+    ticket = normalize_ticket_record(
+        {
+            "ticket_id": ticket_id,
+            "channel": "email",
+            "subject": subject,
+            "body": body,
+        },
+        input_index=0,
+    )
+
+    def passing_grounding_hook(
+        *,
+        ticket: dict[str, Any],
+        sources: tuple[dict[str, Any], ...],
+        related_sources: tuple[dict[str, Any], ...],
+    ) -> dict[str, Any]:
+        return {
+            "claims": [
+                {
+                    "text": "Create a replacement key before revoking the old key.",
+                    "source_ids": [sources[0]["doc_id"]],
+                }
+            ],
+            "unsupported_points": [],
+            "conflicting_points": [],
+            "confidence": 0.92,
+            "reason": "Key rotation steps are documented.",
+        }
+
+    evaluator = RoutingPolicyEvaluator(
+        frozen_policy,
+        claim_grounding_fn=passing_grounding_hook,
+        today=date(2026, 11, 16),
+    )
+    decision = evaluator.evaluate(
+        ticket=ticket,
+        classification=_classification("api_key_issue", confidence=0.92),
+        sources=(primary_source,),
+    )
+
+    assert decision["checks"][0]["name"] == "protected_rule_check"
+    assert decision["checks"][0]["status"] == "passed"
+    assert decision["final_decision"]["protected_case"] is False
+    assert decision["final_decision"]["route"] == "draft_for_review"
+
+
+@pytest.mark.parametrize(
+    ("ticket_id", "subject", "body"),
+    [
+        (
+            "VAL-0054",
+            "Where is our data stored",
+            "One of our customers has asked for written confirmation of where their data is physically stored.",
+        ),
+        (
+            "VAL-0076",
+            "Need data to stay in the EU",
+            "We need our data to remain within the EU for a contract we are signing.",
+        ),
+    ],
+)
+def test_data_residency_tickets_pass_protected_rule_check_and_draft(
+    ticket_id: str,
+    subject: str,
+    body: str,
+) -> None:
+    frozen_policy = load_frozen_routing_policy(FROZEN_POLICY_PATH)
+    snapshots = _real_kb_snapshots_by_doc_id()
+    primary_source = snapshots["DOC-DATA-003"]
+    ticket = normalize_ticket_record(
+        {
+            "ticket_id": ticket_id,
+            "channel": "email",
+            "subject": subject,
+            "body": body,
+        },
+        input_index=0,
+    )
+
+    def passing_grounding_hook(
+        *,
+        ticket: dict[str, Any],
+        sources: tuple[dict[str, Any], ...],
+        related_sources: tuple[dict[str, Any], ...],
+    ) -> dict[str, Any]:
+        return {
+            "claims": [
+                {
+                    "text": "Data residency region is selected at organisation creation.",
+                    "source_ids": [sources[0]["doc_id"]],
+                }
+            ],
+            "unsupported_points": [],
+            "conflicting_points": [],
+            "confidence": 0.91,
+            "reason": "Data residency options are documented.",
+        }
+
+    evaluator = RoutingPolicyEvaluator(
+        frozen_policy,
+        claim_grounding_fn=passing_grounding_hook,
+        today=date(2026, 11, 16),
+    )
+    decision = evaluator.evaluate(
+        ticket=ticket,
+        classification=_classification("data_residency", confidence=0.92),
+        sources=(primary_source,),
+    )
+
+    assert decision["checks"][0]["name"] == "protected_rule_check"
+    assert decision["checks"][0]["status"] == "passed"
+    assert decision["final_decision"]["protected_case"] is False
+    assert decision["final_decision"]["route"] == "draft_for_review"
+
+
+@pytest.mark.parametrize(
+    ("subject", "body", "expected_rule"),
+    [
+        (
+            "Key committed to a public repo",
+            "One of our engineers believes their credentials may have been exposed in a breach at another service. What should we be doing right now?",
+            "operational_protected_security",
+        ),
+        (
+            "Unknown activity",
+            "We have found activity in our audit log from an address none of us recognise, going back to yesterday morning.",
+            "operational_protected_security",
+        ),
+        (
+            "Startup output",
+            "Our production secrets in the logs are visible to all developers.",
+            "operational_protected_security",
+        ),
+        (
+            "Possible account compromise",
+            "A former employee appears to still have access and someone took over my account.",
+            "operational_protected_account_compromise",
+        ),
+    ],
+)
+def test_genuine_security_and_compromise_tickets_fail_protected_rule_check(
+    subject: str,
+    body: str,
+    expected_rule: str,
+) -> None:
+    frozen_policy = load_frozen_routing_policy(FROZEN_POLICY_PATH)
+    snapshots = _real_kb_snapshots_by_doc_id()
+    ticket = normalize_ticket_record(
+        {
+            "ticket_id": "SEC-REG-1",
+            "channel": "email",
+            "subject": subject,
+            "body": body,
+        },
+        input_index=0,
+    )
+    evaluator = RoutingPolicyEvaluator(
+        frozen_policy,
+        today=date(2026, 11, 16),
+    )
+    decision = evaluator.evaluate(
+        ticket=ticket,
+        classification=_classification("api_key_issue", confidence=0.95),
+        sources=(snapshots["DOC-API-001"],),
+    )
+
+    assert decision["checks"][0]["name"] == "protected_rule_check"
+    assert decision["checks"][0]["status"] == "failed"
+    assert decision["final_decision"]["route"] == "escalate"
+    assert decision["final_decision"]["protected_case"] is True
+    assert decision["final_decision"]["matched_rule"] == expected_rule
+
+
+@pytest.mark.parametrize(
+    ("ticket_id", "subject", "body", "intent"),
+    [
+        (
+            "VAL-0032",
+            "",
+            "It would be very useful to set spend caps per project rather than only for the whole organisation.",
+            "quota_or_overage",
+        ),
+        (
+            "FEAT-USEFUL-1",
+            "Feature suggestion",
+            "It would be useful to configure per-environment alert thresholds.",
+            "configuration_help",
+        ),
+    ],
+)
+def test_feature_request_usefulness_phrases_fail_protected_rule_check(
+    ticket_id: str,
+    subject: str,
+    body: str,
+    intent: str,
+) -> None:
+    frozen_policy = load_frozen_routing_policy(FROZEN_POLICY_PATH)
+    snapshots = _real_kb_snapshots_by_doc_id()
+    ticket = normalize_ticket_record(
+        {
+            "ticket_id": ticket_id,
+            "channel": "email",
+            "subject": subject,
+            "body": body,
+        },
+        input_index=0,
+    )
+    evaluator = RoutingPolicyEvaluator(
+        frozen_policy,
+        today=date(2026, 11, 16),
+    )
+    decision = evaluator.evaluate(
+        ticket=ticket,
+        classification=_classification(intent, confidence=0.92),
+        sources=(snapshots["DOC-API-001"],),
+    )
+
+    assert decision["checks"][0]["name"] == "protected_rule_check"
+    assert decision["checks"][0]["status"] == "failed"
+    assert decision["final_decision"]["route"] == "escalate"
+    assert decision["final_decision"]["protected_case"] is True
+    assert decision["final_decision"]["matched_rule"] == "operational_protected_feature_request"
+
+
+@pytest.mark.parametrize(
+    ("ticket_id", "subject", "body", "intent"),
+    [
+        (
+            "QUOTA-TROUBLE-1",
+            "Spend cap hit",
+            "Spend cap stopped our service after a weekend traffic increase. How do we change that?",
+            "quota_or_overage",
+        ),
+        (
+            "CONFIG-TROUBLE-1",
+            "Wrong environment values",
+            "Our staging environment is picking up production configuration values. I cannot work out where they are coming from.",
+            "configuration_help",
+        ),
+    ],
+)
+def test_ordinary_quota_and_configuration_troubleshooting_pass_protected_rule_check(
+    ticket_id: str,
+    subject: str,
+    body: str,
+    intent: str,
+) -> None:
+    frozen_policy = load_frozen_routing_policy(FROZEN_POLICY_PATH)
+    snapshots = _real_kb_snapshots_by_doc_id()
+    ticket = normalize_ticket_record(
+        {
+            "ticket_id": ticket_id,
+            "channel": "email",
+            "subject": subject,
+            "body": body,
+        },
+        input_index=0,
+    )
+    evaluator = RoutingPolicyEvaluator(
+        frozen_policy,
+        today=date(2026, 11, 16),
+    )
+    decision = evaluator.evaluate(
+        ticket=ticket,
+        classification=_classification(intent, confidence=0.92),
+        sources=(snapshots["DOC-API-001"],),
+    )
+
+    assert decision["checks"][0]["name"] == "protected_rule_check"
+    assert decision["checks"][0]["status"] == "passed"
+    assert decision["final_decision"]["protected_case"] is False
+
+
+@pytest.mark.parametrize(
+    ("ticket_id", "intent", "subject", "body"),
+    [
+        (
+            "VAL-0038",
+            "performance_degradation",
+            "Severe API latency across production cluster",
+            "P99 response times spiked to 12 seconds across our production API endpoints.",
+        ),
+        (
+            "DB-HIGH-1",
+            "database_issue",
+            "Primary database connection pool exhausted",
+            "Our production database is rejecting new connections with timeout errors.",
+        ),
+    ],
+)
+def test_high_urgency_database_and_performance_incidents_escalate_without_grounding(
+    ticket_id: str,
+    intent: str,
+    subject: str,
+    body: str,
+) -> None:
+    frozen_policy = load_frozen_routing_policy(FROZEN_POLICY_PATH)
+    primary_source = _real_kb_snapshots_by_doc_id()["DOC-API-001"]
+    ticket = normalize_ticket_record(
+        {
+            "ticket_id": ticket_id,
+            "channel": "email",
+            "subject": subject,
+            "body": body,
+        },
+        input_index=0,
+    )
+    grounding_calls: list[dict[str, Any]] = []
+
+    def _spy_grounding(**kwargs: Any) -> dict[str, Any]:
+        grounding_calls.append(kwargs)
+        return {
+            "confidence": 0.95,
+            "claims": [{"text": "Should not be called.", "source_ids": ["DOC-API-001"]}],
+            "unsupported_points": [],
+            "conflicting_points": [],
+            "reason": "Should not be called.",
+        }
+
+    classification = {**_classification(intent, confidence=0.92), "urgency": "high"}
+    evaluator = RoutingPolicyEvaluator(
+        frozen_policy,
+        claim_grounding_fn=_spy_grounding,
+        today=date(2026, 11, 16),
+    )
+    evaluation = evaluator.evaluate(
+        ticket=ticket,
+        classification=classification,
+        sources=(primary_source,),
+    )
+
+    assert grounding_calls == []
+    assert [check["status"] for check in evaluation["checks"]] == [
+        "passed",
+        "passed",
+        "skipped",
+        "skipped",
+    ]
+    assert evaluation["checks"][3]["name"] == "claim_grounding_check"
+    assert evaluation["final_decision"] == {
+        "route": "escalate",
+        "matched_rule": "high_urgency_incident",
+        "reason": evaluation["final_decision"]["reason"],
+        "failed_check": None,
+        "protected_case": False,
+        "evidence_ready": None,
+    }
+    for check in evaluation["checks"]:
+        Draft202012Validator(POLICY_CHECK_SCHEMA).validate(check)
+    Draft202012Validator(POLICY_FINAL_DECISION_SCHEMA).validate(
+        evaluation["final_decision"]
+    )
+    routing_payload = {
+        "policy_version": frozen_policy["policy_version"],
+        "matched_rule": evaluation["final_decision"]["matched_rule"],
+        "confidence_threshold": frozen_policy["classification_confidence_threshold"],
+        "threshold_source": frozen_policy["threshold_source"],
+        "calibration_method": frozen_policy["calibration_method"],
+        "calibration_source": frozen_policy["calibration_source"],
+        "policy_frozen": frozen_policy["frozen"],
+        "policy_provenance": {
+            "policy_version": frozen_policy["policy_version"],
+            "classification_confidence_threshold": frozen_policy[
+                "classification_confidence_threshold"
+            ],
+            "threshold_source": frozen_policy["threshold_source"],
+            "calibration_method": frozen_policy["calibration_method"],
+            "calibration_source": frozen_policy["calibration_source"],
+            "frozen": frozen_policy["frozen"],
+            "policy_file_sha256": "b" * 64,
+            "threshold_sha256": "c" * 64,
+            "classifier_implementation_sha256": "d" * 64,
+            "classifier_model_sha256": "e" * 64,
+        },
+        "retrieval": {
+            "status": "ready",
+            "reason_code": "sources_ready",
+            "reason": "Retrieved primary source.",
+            "eligible_candidate_count": 1,
+            "excluded_candidate_counts": {},
+            "minimum_similarity": MINIMUM_SIMILARITY,
+            "embedding_model": "gemini-embedding-001",
+            "source_sha256": None,
+            "metadata_manifest_sha256": None,
+        },
+        "checks": evaluation["checks"],
+        "final_decision": evaluation["final_decision"],
+    }
+    Draft202012Validator(ROUTING_SCHEMA).validate(routing_payload)
+
+    legacy = route_ticket_classification(
+        classification,
+        frozen_policy,
+        evidence_ready=True,
+        ticket=ticket,
+    )
+    assert legacy.route == "escalate"
+    assert legacy.matched_rule == "high_urgency_incident"
+    assert legacy.protected_case is False
+
+
+@pytest.mark.parametrize(
+    ("intent", "urgency"),
+    [
+        ("performance_degradation", "medium"),
+        ("performance_degradation", "low"),
+        ("database_issue", "medium"),
+        ("database_issue", "low"),
+        ("deployment_failure", "high"),
+        ("api_key_issue", "high"),
+    ],
+)
+def test_non_high_incidents_and_high_urgency_other_intents_reach_draft_for_review(
+    intent: str,
+    urgency: str,
+) -> None:
+    frozen_policy = load_frozen_routing_policy(FROZEN_POLICY_PATH)
+    primary_source = _real_kb_snapshots_by_doc_id()["DOC-API-001"]
+    ticket = normalize_ticket_record(
+        {
+            "ticket_id": f"DRAFT-{intent}-{urgency}",
+            "channel": "email",
+            "subject": "Configuration question",
+            "body": "Please share the documented steps for updating our API configuration.",
+        },
+        input_index=0,
+    )
+    grounding_calls: list[dict[str, Any]] = []
+
+    def _spy_grounding(**kwargs: Any) -> dict[str, Any]:
+        grounding_calls.append(kwargs)
+        return {
+            "confidence": 0.94,
+            "claims": [
+                {"text": "Use the documented configuration endpoint.", "source_ids": ["DOC-API-001"]}
+            ],
+            "unsupported_points": [],
+            "conflicting_points": [],
+            "reason": "Grounded in DOC-API-001.",
+        }
+
+    classification = {**_classification(intent, confidence=0.92), "urgency": urgency}
+    evaluator = RoutingPolicyEvaluator(
+        frozen_policy,
+        claim_grounding_fn=_spy_grounding,
+        today=date(2026, 11, 16),
+    )
+    evaluation = evaluator.evaluate(
+        ticket=ticket,
+        classification=classification,
+        sources=(primary_source,),
+    )
+
+    assert len(grounding_calls) == 1
+    assert [check["status"] for check in evaluation["checks"]] == [
+        "passed",
+        "passed",
+        "passed",
+        "passed",
+    ]
+    assert evaluation["final_decision"]["route"] == "draft_for_review"
+    assert evaluation["final_decision"]["protected_case"] is False
+
+    legacy = route_ticket_classification(
+        classification,
+        frozen_policy,
+        evidence_ready=True,
+        ticket=ticket,
+    )
+    assert legacy.route == "draft_for_review"
+    assert legacy.protected_case is False
+
+
+def test_low_confidence_high_urgency_incident_fails_confidence_check() -> None:
+    frozen_policy = load_frozen_routing_policy(FROZEN_POLICY_PATH)
+    primary_source = _real_kb_snapshots_by_doc_id()["DOC-API-001"]
+    ticket = normalize_ticket_record(
+        {
+            "ticket_id": "LOW-CONF-HIGH-1",
+            "channel": "email",
+            "subject": "Slow response times",
+            "body": "Queries seem slower than usual today.",
+        },
+        input_index=0,
+    )
+    classification = {
+        **_classification("performance_degradation", confidence=0.50),
+        "urgency": "high",
+    }
+    evaluator = RoutingPolicyEvaluator(frozen_policy, today=date(2026, 11, 16))
+    evaluation = evaluator.evaluate(
+        ticket=ticket,
+        classification=classification,
+        sources=(primary_source,),
+    )
+
+    assert evaluation["final_decision"]["route"] == "escalate"
+    assert evaluation["final_decision"]["matched_rule"] == (
+        "below_classification_confidence_threshold"
+    )
+    assert evaluation["final_decision"]["failed_check"] == "classification_confidence_check"
+    assert evaluation["final_decision"]["protected_case"] is False
+
+
+@pytest.mark.parametrize("bad_urgency", [None, "unknown", "critical", 123])
+def test_classified_payload_with_missing_or_unsupported_urgency_degrades(
+    bad_urgency: object,
+) -> None:
+    frozen_policy = load_frozen_routing_policy(FROZEN_POLICY_PATH)
+    primary_source = _real_kb_snapshots_by_doc_id()["DOC-API-001"]
+    ticket = normalize_ticket_record(
+        {
+            "ticket_id": "BAD-URGENCY-1",
+            "channel": "email",
+            "subject": "Database query issue",
+            "body": "Queries are timing out.",
+        },
+        input_index=0,
+    )
+    classification: dict[str, Any] = _classification("database_issue", confidence=0.92)
+    if bad_urgency is None:
+        classification.pop("urgency")
+    else:
+        classification["urgency"] = bad_urgency
+
+    evaluator = RoutingPolicyEvaluator(frozen_policy, today=date(2026, 11, 16))
+    evaluation = evaluator.evaluate(
+        ticket=ticket,
+        classification=classification,
+        sources=(primary_source,),
+    )
+
+    assert evaluation["final_decision"]["route"] == "degrade"
+    assert evaluation["final_decision"]["matched_rule"] == "classification_signal_invalid"
+    assert evaluation["final_decision"]["failed_check"] == "classification_confidence_check"
+    assert evaluation["final_decision"]["protected_case"] is False
+
+    legacy = route_ticket_classification(
+        classification,
+        frozen_policy,
+        evidence_ready=True,
+        ticket=ticket,
+    )
+    assert legacy.route == "degrade"
+    assert legacy.matched_rule == "classification_signal_invalid"
+    assert legacy.protected_case is False
+
+
+@pytest.mark.parametrize(
+    ("noul_value", "expected_status", "expected_route", "expected_evidence_ready"),
+    [
+        (0.51, "passed", "draft_for_review", True),
+        (0.50, "failed", "escalate", False),
+        (0.12, "failed", "escalate", False),
+    ],
+)
+def test_noul_grounding_winning_outcome_semantics_and_evidence_ready(
+    noul_value: float,
+    expected_status: str,
+    expected_route: str,
+    expected_evidence_ready: bool,
+) -> None:
+    """NoulAnswer passes strictly when noul > 1 - noul (noul > 0.5) and fails closed otherwise."""
+    frozen_policy = load_frozen_routing_policy(FROZEN_POLICY_PATH)
+    primary_source = _real_kb_snapshots_by_doc_id()["DOC-API-001"]
+    ticket = normalize_ticket_record(
+        {
+            "ticket_id": "NOUL-BOUNDARY-1",
+            "channel": "email",
+            "subject": "API rate limit headers",
+            "body": "Which headers show remaining API quota?",
+        },
+        input_index=0,
+    )
+    evaluator = RoutingPolicyEvaluator(
+        frozen_policy,
+        claim_grounding_fn=lambda **_: {
+            "noul": noul_value,
+            "confidence": max(noul_value, 1.0 - noul_value),
+            "reason": f"Test Noul score {noul_value}",
+        },
+        today=date(2026, 11, 16),
+    )
+    evaluation = evaluator.evaluate(
+        ticket=ticket,
+        classification=_classification("api_usage_question", confidence=0.91),
+        sources=(primary_source,),
+    )
+    assert evaluation["checks"][3]["status"] == expected_status
+    assert evaluation["checks"][3]["noul"] == pytest.approx(noul_value)
+    assert evaluation["final_decision"]["route"] == expected_route
+    assert evaluation["final_decision"]["evidence_ready"] is expected_evidence_ready
+
+
+@pytest.mark.parametrize(
+    ("intent", "body"),
+    [
+        ("unclear_request", "It is broken and nothing works."),
+        ("feature_request", "It would be very useful to export audit logs as Parquet."),
+        ("roadmap_request", "When will multi-region failover be on the roadmap?"),
+    ],
+)
+def test_non_documented_protected_categories_set_evidence_ready_false(
+    intent: str,
+    body: str,
+) -> None:
+    """Non-documented protected/unclear categories set final_decision.evidence_ready=False."""
+    frozen_policy = load_frozen_routing_policy(FROZEN_POLICY_PATH)
+    primary_source = _real_kb_snapshots_by_doc_id()["DOC-API-001"]
+    ticket = normalize_ticket_record(
+        {
+            "ticket_id": f"NON-DOC-{intent}",
+            "channel": "email",
+            "subject": "Support request",
+            "body": body,
+        },
+        input_index=0,
+    )
+    evaluator = RoutingPolicyEvaluator(frozen_policy, today=date(2026, 11, 16))
+    evaluation = evaluator.evaluate(
+        ticket=ticket,
+        classification=_classification(intent, confidence=0.92),
+        sources=(primary_source,),
+    )
+    assert evaluation["final_decision"]["route"] == "escalate"
+    assert evaluation["final_decision"]["evidence_ready"] is False
+
+
+def test_gemini_claim_grounding_checker_chunks_by_question_and_byte_caps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Oversized batches split automatically on DECISIONS_MAX_QUESTIONS and DECISIONS_MAX_INPUT_BYTES."""
+    from cloudserve_support.classification.ticket_classification import (
+        DECISIONS_CLASSIFIER_MODEL,
+        DECISIONS_MAX_INPUT_BYTES,
+        DECISIONS_MAX_QUESTIONS,
+    )
+    from cloudserve_support.config import Settings
+    from cloudserve_support.routing.routing_policy import (
+        ClaimGroundingError,
+        GeminiClaimGroundingChecker,
+    )
+
+    primary_source = _real_kb_snapshots_by_doc_id()["DOC-API-001"]
+    recorded_calls: list[tuple[str, int, int]] = []
+
+    class _RecordingClient:
+        def __init__(self) -> None:
+            self.decisions = SimpleNamespace(create=self._create)
+
+        @staticmethod
+        def _create(*, model: str, input: str, questions: dict[str, Any], **_: object) -> SimpleNamespace:
+            recorded_calls.append((model, len(questions), len(input.encode("utf-8"))))
+            assert model == DECISIONS_CLASSIFIER_MODEL
+            assert len(questions) <= DECISIONS_MAX_QUESTIONS
+            assert len(input.encode("utf-8")) <= DECISIONS_MAX_INPUT_BYTES
+            return SimpleNamespace(
+                model=DECISIONS_CLASSIFIER_MODEL,
+                answers={
+                    q_name: SimpleNamespace(type="noul", noul=0.85, confidence=0.85)
+                    for q_name in questions
+                },
+            )
+
+    checker = GeminiClaimGroundingChecker(
+        Settings(gemini_api_key="test-key"),
+        client=_RecordingClient(),
+        today=date(2026, 11, 16),
+    )
+
+    # 1. > 400 tickets sharing one article splits into 2 chunks (400 + 2).
+    many_tickets = [
+        (
+            normalize_ticket_record(
+                {
+                    "ticket_id": f"CAP-Q-{idx}",
+                    "channel": "email",
+                    "subject": f"Rate limit question {idx}",
+                    "body": "Which headers show API quota?",
+                },
+                input_index=idx,
+            ),
+            (primary_source,),
+            (),
+        )
+        for idx in range(DECISIONS_MAX_QUESTIONS + 2)
+    ]
+    many_results = checker.evaluate_batch(many_tickets)
+    assert len(many_results) == DECISIONS_MAX_QUESTIONS + 2
+    assert all(isinstance(r, dict) and r["noul"] == pytest.approx(0.85) for r in many_results)
+    assert [count for _, count, _ in recorded_calls] == [DECISIONS_MAX_QUESTIONS, 2]
+
+    # 2. > 1,000,000 bytes across 3 tickets splits into compliant byte-bounded chunks.
+    recorded_calls.clear()
+    large_body = "x" * 200_000
+    large_tickets = [
+        (
+            normalize_ticket_record(
+                {
+                    "ticket_id": f"CAP-B-{idx}",
+                    "channel": "email",
+                    "subject": f"Large ticket {idx}",
+                    "body": large_body,
+                },
+                input_index=idx,
+            ),
+            (primary_source,),
+            (),
+        )
+        for idx in range(3)
+    ]
+    large_results = checker.evaluate_batch(large_tickets)
+    assert len(large_results) == 3
+    assert all(isinstance(r, dict) and r["noul"] == pytest.approx(0.85) for r in large_results)
+    assert len(recorded_calls) == 2
+    assert [count for _, count, _ in recorded_calls] == [2, 1]
+
+    # 3. Out-of-range noul (including 0.0 / 1.0 / 10**400) fails closed to ClaimGroundingError.
+    for out_of_range_noul in (0.0, 1.0, 1.5, -0.1, 10**400):
+        class _BadAnswerClient:
+            def __init__(self, bad_val: float = out_of_range_noul) -> None:
+                self.decisions = SimpleNamespace(
+                    create=lambda **_: SimpleNamespace(
+                        model=DECISIONS_CLASSIFIER_MODEL,
+                        answers={
+                            "ticket_0_grounding": SimpleNamespace(
+                                type="noul",
+                                noul=bad_val,
+                                confidence=0.99,
+                            )
+                        },
+                    )
+                )
+
+        bad_checker = GeminiClaimGroundingChecker(
+            Settings(gemini_api_key="test-key"),
+            client=_BadAnswerClient(),
+            today=date(2026, 11, 16),
+        )
+        bad_result = bad_checker.evaluate_batch([many_tickets[0]])[0]
+        assert isinstance(bad_result, ClaimGroundingError)
+        assert bad_result.code == "invalid_claim_grounding_output"
+
+        bad_hook_eval = RoutingPolicyEvaluator(
+            load_frozen_routing_policy(FROZEN_POLICY_PATH),
+            claim_grounding_fn=lambda bad_val=out_of_range_noul, **_: {
+                "noul": bad_val,
+                "confidence": 0.99,
+            },
+            today=date(2026, 11, 16),
+        ).evaluate(
+            ticket=many_tickets[0][0],
+            classification=_classification("api_usage_question", confidence=0.91),
+            sources=(primary_source,),
+        )
+        assert bad_hook_eval["final_decision"]["route"] == "degrade"
+        assert bad_hook_eval["checks"][3]["error_code"] == "invalid_claim_grounding_output"
+

@@ -20,10 +20,12 @@ from cloudserve_support.generation.draft_generation import (
     validate_generated_draft,
 )
 from cloudserve_support.guardrails.draft_safety import (
-    check_claim_grounding,
+    GeminiPostDraftClaimVerifier,
+    PostDraftClaimVerificationError,
     contains_private_data,
     contains_private_source_data,
     contains_prompt_injection,
+    create_post_draft_claim_verifier,
     eligible_source_subset,
     filter_evaluation_context,
     inspect_claim_grounding,
@@ -72,6 +74,9 @@ def build_ticket_outcome(
     duplicate_ticket_id: bool,
     skip_draft: bool = False,
     skip_draft_review: bool = False,
+    precomputed_draft_attempt: tuple[dict[str, Any] | None, float, Exception | None] | None = None,
+    precomputed_claim_grounding: dict[str, Any] | PostDraftClaimVerificationError | None = None,
+    post_draft_verifier: GeminiPostDraftClaimVerifier | None = None,
     progress_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Return the final structured draft, complete handoff, or safe degradation."""
@@ -92,7 +97,17 @@ def build_ticket_outcome(
     pre_draft_safety_checks = safety_eval.safety_checks
     pre_provider_guardrail_block = ticket_injection_detected or private_input_detected
     injection_detected = ticket_injection_detected
-    evidence_ready = bool(eligible_sources) and retrieval.evidence_ready
+    policy_evidence_ready = (
+        policy_evaluation.get("final_decision", {}).get("evidence_ready")
+        if isinstance(policy_evaluation, Mapping)
+        and isinstance(policy_evaluation.get("final_decision"), Mapping)
+        else None
+    )
+    evidence_ready = (
+        False
+        if policy_evidence_ready is False
+        else bool(eligible_sources) and retrieval.evidence_ready
+    )
 
     policy_provenance = {
         "policy_version": policy["policy_version"],
@@ -185,6 +200,8 @@ def build_ticket_outcome(
         "reasoning_effort": None,
         "status": "not_attempted",
         "error_code": None,
+        "skip_draft": bool(skip_draft),
+        "skip_draft_review": bool(skip_draft_review),
     }
     draft: dict[str, Any] | None = None
     post_draft_diagnostics: dict[str, Any] | None = None
@@ -238,49 +255,35 @@ def build_ticket_outcome(
             reason = "No source passed the eligibility guardrail for drafting."
         elif skip_draft:
             draft_generation_skipped = True
-            route = "escalate"
             reason = "Draft generation skipped by --skip-draft; human review is required."
             _report_ticket_step(progress_callback, "Draft generation skipped by --skip-draft")
         else:
             operational_ticket = replace(ticket, context=scrubbed_context)
             sanitized_policy_evaluation = _sanitize_policy_evaluation(policy_evaluation)
-            if not _has_verified_drafting_claims(
-                sanitized_policy_evaluation,
-                primary_sources=eligible_sources,
-                related_sources=eligible_related_sources,
-            ):
-                _report_ticket_step(
-                    progress_callback,
-                    "Draft skipped because policy-verified claims are missing",
-                )
-                route = "degrade"
-                reason = (
-                    "Routing policy evaluation is missing verified grounding claims; "
-                    "manual review is required."
-                )
-                error = {"code": "routing_policy_invalid", "message": reason}
-            else:
-                (
-                    draft,
-                    route,
-                    reason,
-                    error,
-                    draft_generation_request_duration_seconds,
-                    draft_guardrail_checks,
-                    post_draft_diagnostics,
-                ) = _attempt_draft_generation(
-                    ticket=operational_ticket,
-                    eligible_sources=eligible_sources,
-                    eligible_related_sources=eligible_related_sources,
-                    policy_evaluation=sanitized_policy_evaluation,
-                    default_reason=reason,
-                    settings=settings,
-                    generator=generator,
-                    skip_review=skip_draft_review,
-                    generation=generation,
-                    progress_callback=progress_callback,
-                )
-                guardrail_checks.extend(draft_guardrail_checks)
+            (
+                draft,
+                route,
+                reason,
+                error,
+                draft_generation_request_duration_seconds,
+                draft_guardrail_checks,
+                post_draft_diagnostics,
+            ) = _attempt_draft_generation(
+                ticket=operational_ticket,
+                eligible_sources=eligible_sources,
+                eligible_related_sources=eligible_related_sources,
+                policy_evaluation=sanitized_policy_evaluation,
+                default_reason=reason,
+                settings=settings,
+                generator=generator,
+                skip_review=skip_draft_review,
+                generation=generation,
+                precomputed_draft_attempt=precomputed_draft_attempt,
+                precomputed_claim_grounding=precomputed_claim_grounding,
+                post_draft_verifier=post_draft_verifier,
+                progress_callback=progress_callback,
+            )
+            guardrail_checks.extend(draft_guardrail_checks)
     else:
         _report_ticket_step(
             progress_callback,
@@ -290,65 +293,97 @@ def build_ticket_outcome(
     if generation["status"] == "not_attempted":
         _report_ticket_step(
             progress_callback,
-            "Post-draft checks: not run (no draft generated)",
+            "Post-draft checks: skipped by --skip-draft-review"
+            if skip_draft_review
+            else "Post-draft checks: not run (no draft generated)",
         )
 
     if not any(check["check"] == "output_structure" for check in guardrail_checks):
+        post_draft_evidence = (
+            "Not evaluated because --skip-draft-review was set."
+            if skip_draft_review
+            else None
+        )
+        post_draft_action = "skipped" if skip_draft_review else "not_applicable"
         guardrail_checks.extend(
             [
                 _make_guardrail_check(
                     "output_structure",
                     passed=True,
                     blocked=False,
-                    evidence="No draft was generated for this route.",
-                    action="not_applicable",
+                    evidence=post_draft_evidence or "No draft was generated for this route.",
+                    action=post_draft_action,
                 ),
                 _make_guardrail_check(
                     "citation_grounding",
                     passed=True,
                     blocked=False,
-                    evidence="No draft claims were emitted for this route.",
-                    action="not_applicable",
+                    evidence=post_draft_evidence or "No draft claims were emitted for this route.",
+                    action=post_draft_action,
                 ),
                 _make_guardrail_check(
                     "private_data_output",
                     passed=True,
                     blocked=False,
-                    evidence="No draft text was emitted.",
-                    action="not_applicable",
+                    evidence=post_draft_evidence or "No draft text was emitted.",
+                    action=post_draft_action,
                 ),
             ]
         )
     if not any(check["check"] == "instruction_integrity" for check in guardrail_checks):
-        guardrail_checks.append(
-            _make_guardrail_check(
-                "instruction_integrity",
-                passed=not injection_detected,
-                blocked=injection_detected,
-                evidence=(
-                    "Instruction-like content was not followed and the ticket was escalated."
-                    if injection_detected
-                    else "Provider instructions and untrusted-data boundaries were preserved."
-                ),
-                action="block_and_escalate" if injection_detected else "enforced",
+        if skip_draft_review and not injection_detected:
+            guardrail_checks.append(
+                _make_guardrail_check(
+                    "instruction_integrity",
+                    passed=True,
+                    blocked=False,
+                    evidence="Not evaluated because --skip-draft-review was set.",
+                    action="skipped",
+                )
             )
-        )
+        else:
+            guardrail_checks.append(
+                _make_guardrail_check(
+                    "instruction_integrity",
+                    passed=not injection_detected,
+                    blocked=injection_detected,
+                    evidence=(
+                        "Instruction-like content was not followed and the ticket was escalated."
+                        if injection_detected
+                        else "Provider instructions and untrusted-data boundaries were preserved."
+                    ),
+                    action="block_and_escalate" if injection_detected else "enforced",
+                )
+            )
 
     if error and error["code"] in {"invalid_ticket_record", "duplicate_ticket_id"}:
         routing_fields["matched_rule"] = "ticket_validation_failed"
         routing_fields["protected_case"] = False
+    elif draft_generation_skipped:
+        routing_fields["matched_rule"] = "draft_generation_skipped"
+        routing_fields["evidence_ready"] = (
+            False if policy_evidence_ready is False else bool(eligible_sources)
+        )
     elif route != policy_route:
-        if draft_generation_skipped:
-            routing_fields["matched_rule"] = "draft_generation_skipped"
-        elif route == "degrade" and error and error["code"] == "classification_unavailable":
+        if route == "degrade" and error and error["code"] == "classification_unavailable":
             routing_fields["matched_rule"] = "classification_unavailable_or_model_mismatch"
         elif route == "degrade" and error and error["code"] == "routing_policy_invalid":
             routing_fields["matched_rule"] = "routing_policy_invalid"
         elif route == "degrade" and generation["status"] == "failed":
             routing_fields["matched_rule"] = "generation_unavailable"
+        elif (
+            route == "degrade"
+            and error
+            and error["code"].startswith(
+                ("post_draft_verification_", "invalid_post_draft_verification_")
+            )
+        ):
+            routing_fields["matched_rule"] = error["code"]
         else:
             routing_fields["matched_rule"] = "generation_guardrail_blocked"
-        routing_fields["evidence_ready"] = bool(eligible_sources)
+        routing_fields["evidence_ready"] = (
+            False if policy_evidence_ready is False else bool(eligible_sources)
+        )
 
     if route in {"escalate", "degrade"}:
         _report_ticket_step(progress_callback, "Building and sanitizing human handoff")
@@ -452,27 +487,6 @@ def _resolve_policy_decision(
     )
 
 
-def _has_verified_drafting_claims(
-    policy_evaluation: Mapping[str, Any] | None,
-    *,
-    primary_sources: tuple[dict[str, Any], ...],
-    related_sources: tuple[dict[str, Any], ...],
-) -> bool:
-    """Confirm policy_evaluation supplies non-empty verified claims against safe sources."""
-    allowed_ids = {
-        identifier
-        for source in (*primary_sources, *related_sources)
-        for identifier in (source.get("passage_id"), source.get("doc_id"))
-        if isinstance(identifier, str) and identifier
-    }
-    return bool(
-        extract_verified_policy_claims(
-            policy_evaluation,
-            allowed_source_ids=allowed_ids,
-        )
-    )
-
-
 def _sanitize_policy_evaluation(
     policy_evaluation: Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -552,6 +566,9 @@ def _attempt_draft_generation(
     generator: DraftGenerationProvider,
     skip_review: bool,
     generation: dict[str, Any],
+    precomputed_draft_attempt: tuple[dict[str, Any] | None, float, Exception | None] | None = None,
+    precomputed_claim_grounding: dict[str, Any] | PostDraftClaimVerificationError | None = None,
+    post_draft_verifier: GeminiPostDraftClaimVerifier | None = None,
     progress_callback: Callable[[str], None] | None,
 ) -> tuple[
     dict[str, Any] | None,
@@ -564,28 +581,41 @@ def _attempt_draft_generation(
 ]:
     """Generate one draft, optionally bypassing its in-run review checks."""
     try:
-        _report_ticket_step(progress_callback, "Generating draft")
-        raw_draft = generator.generate_draft(
-            ticket,
-            sources=eligible_sources,
-            related_sources=eligible_related_sources,
-            policy_evaluation=policy_evaluation,
-            model_name=settings.llm_model,
-        )
-        duration = _read_generation_request_duration(generator)
-        draft, route, reason, checks, post_draft_diagnostics = _review_generated_draft(
+        if precomputed_draft_attempt is not None:
+            raw_draft, duration, precomputed_error = precomputed_draft_attempt
+            if precomputed_error is not None:
+                raise precomputed_error
+            assert raw_draft is not None
+        else:
+            _report_ticket_step(progress_callback, "Generating draft")
+            raw_draft = generator.generate_draft(
+                ticket,
+                sources=eligible_sources,
+                related_sources=eligible_related_sources,
+                policy_evaluation=policy_evaluation,
+                model_name=settings.llm_model,
+            )
+            duration = _read_generation_request_duration(generator)
+        draft, route, reason, review_error, checks, post_draft_diagnostics = _review_generated_draft(
             raw_draft,
             eligible_sources=eligible_sources,
             eligible_related_sources=eligible_related_sources,
             policy_evaluation=policy_evaluation,
             default_reason=default_reason,
+            settings=settings,
             skip_review=skip_review,
+            precomputed_claim_grounding=precomputed_claim_grounding,
+            post_draft_verifier=post_draft_verifier,
             progress_callback=progress_callback,
         )
         _report_post_draft_checks(progress_callback, checks)
         generation["status"] = "generated"
     except DraftGenerationError as generation_error:
-        duration = _read_generation_request_duration(generator)
+        duration = (
+            precomputed_draft_attempt[1]
+            if precomputed_draft_attempt is not None
+            else _read_generation_request_duration(generator)
+        )
         generation["status"] = "failed"
         generation["error_code"] = generation_error.code
         error = {"code": generation_error.code, "message": str(generation_error)}
@@ -605,7 +635,11 @@ def _attempt_draft_generation(
             None,
         )
     except Exception as unexpected_generation_error:
-        duration = _read_generation_request_duration(generator)
+        duration = (
+            precomputed_draft_attempt[1]
+            if precomputed_draft_attempt is not None
+            else _read_generation_request_duration(generator)
+        )
         generation["status"] = "failed"
         generation["error_code"] = "generation_provider_error"
         error = {
@@ -630,7 +664,7 @@ def _attempt_draft_generation(
             None,
         )
 
-    return draft, route, reason, None, duration, checks, post_draft_diagnostics
+    return draft, route, reason, review_error, duration, checks, post_draft_diagnostics
 
 
 def _review_generated_draft(
@@ -640,12 +674,16 @@ def _review_generated_draft(
     eligible_related_sources: tuple[dict[str, Any], ...],
     policy_evaluation: Mapping[str, Any] | None,
     default_reason: str,
+    settings: Settings,
     skip_review: bool,
+    precomputed_claim_grounding: dict[str, Any] | PostDraftClaimVerificationError | None = None,
+    post_draft_verifier: GeminiPostDraftClaimVerifier | None = None,
     progress_callback: Callable[[str], None] | None,
 ) -> tuple[
     dict[str, Any] | None,
     str,
     str,
+    dict[str, str] | None,
     list[dict[str, Any]],
     dict[str, Any] | None,
 ]:
@@ -670,7 +708,7 @@ def _review_generated_draft(
                 "instruction_integrity",
             )
         ]
-        return raw_draft, "draft_for_review", default_reason, checks, None
+        return raw_draft, "draft_for_review", default_reason, None, checks, None
 
     _report_ticket_step(
         progress_callback,
@@ -691,8 +729,11 @@ def _review_generated_draft(
     return _evaluate_generated_draft_guardrails(
         draft_candidate=draft_candidate,
         all_safe_sources=all_safe_sources,
-        verified_claims=verified_claims,
+        verified_claims=verified_claims or None,
         default_reason=default_reason,
+        settings=settings,
+        precomputed_claim_grounding=precomputed_claim_grounding,
+        post_draft_verifier=post_draft_verifier,
     )
 
 
@@ -700,12 +741,16 @@ def _evaluate_generated_draft_guardrails(
     *,
     draft_candidate: dict[str, Any],
     all_safe_sources: tuple[dict[str, Any], ...],
-    verified_claims: list[dict[str, Any]],
+    verified_claims: list[dict[str, Any]] | None,
     default_reason: str,
+    settings: Settings,
+    precomputed_claim_grounding: dict[str, Any] | PostDraftClaimVerificationError | None = None,
+    post_draft_verifier: GeminiPostDraftClaimVerifier | None = None,
 ) -> tuple[
     dict[str, Any] | None,
     str,
     str,
+    dict[str, str] | None,
     list[dict[str, Any]],
     dict[str, Any] | None,
 ]:
@@ -717,12 +762,41 @@ def _evaluate_generated_draft_guardrails(
     output_injection_detected = contains_prompt_injection(
         claim_texts
     ) or contains_prompt_injection(draft_candidate["plain_text"])
-    grounded, grounding_evidence = check_claim_grounding(
-        draft_candidate["claims"],
-        all_safe_sources,
-        verified_claims=verified_claims,
+
+    verification_error: PostDraftClaimVerificationError | None = None
+    grounding_inspection: dict[str, Any]
+    if isinstance(precomputed_claim_grounding, PostDraftClaimVerificationError):
+        verification_error = precomputed_claim_grounding
+        grounding_inspection = {"grounded": False, "failure_reason": str(verification_error), "failed_claims": [], "minimum_ratio": None}
+    elif isinstance(precomputed_claim_grounding, dict):
+        grounding_inspection = precomputed_claim_grounding
+    else:
+        verifier = post_draft_verifier or create_post_draft_claim_verifier(settings)
+        if verifier is not None:
+            batch_result = verifier.verify_batch([(draft_candidate["claims"], all_safe_sources)])[0]
+            if isinstance(batch_result, PostDraftClaimVerificationError):
+                verification_error = batch_result
+                grounding_inspection = {"grounded": False, "failure_reason": str(verification_error), "failed_claims": [], "minimum_ratio": None}
+            else:
+                grounding_inspection = batch_result
+        else:
+            grounding_inspection = inspect_claim_grounding(
+                draft_candidate["claims"],
+                all_safe_sources,
+                verified_claims=verified_claims,
+            )
+
+    grounded = bool(grounding_inspection["grounded"]) if verification_error is None else False
+    grounding_evidence = (
+        str(verification_error)
+        if verification_error is not None
+        else grounding_inspection.get("failure_reason")
+        or "Every claim is grounded in resolvable eligible sources."
     )
-    if draft_candidate["unsupported_points"] or draft_candidate["conflicting_points"]:
+    if (
+        verification_error is None
+        and (draft_candidate["unsupported_points"] or draft_candidate["conflicting_points"])
+    ):
         grounded = False
         grounding_evidence = (
             "The provider reported unsupported or conflicting points; draft withheld."
@@ -740,7 +814,11 @@ def _evaluate_generated_draft_guardrails(
             passed=grounded,
             blocked=not grounded,
             evidence=grounding_evidence,
-            action="continue" if grounded else "block_and_escalate",
+            action=(
+                "degrade_for_review"
+                if verification_error is not None
+                else "continue" if grounded else "block_and_escalate"
+            ),
         ),
         _make_guardrail_check(
             "private_data_output",
@@ -765,36 +843,43 @@ def _evaluate_generated_draft_guardrails(
             action="block_and_escalate" if output_injection_detected else "enforced",
         ),
     ]
+    if verification_error is not None:
+        post_draft_diagnostics = _build_sanitized_post_draft_diagnostics(
+            draft_candidate=draft_candidate,
+            grounding_inspection=grounding_inspection,
+        )
+        return (
+            None,
+            "degrade",
+            "Post-draft claim verification failed; the ticket is available for human review.",
+            {"code": verification_error.code, "message": str(verification_error)},
+            checks,
+            post_draft_diagnostics,
+        )
     if private_output_detected or output_injection_detected or not grounded:
         post_draft_diagnostics = _build_sanitized_post_draft_diagnostics(
             draft_candidate=draft_candidate,
-            all_safe_sources=all_safe_sources,
-            verified_claims=verified_claims,
+            grounding_inspection=grounding_inspection,
         )
         return (
             None,
             "escalate",
             "Generated content failed a privacy, instruction-integrity, or source-grounding check; "
             "the draft was withheld for human review.",
+            None,
             checks,
             post_draft_diagnostics,
         )
-    return draft_candidate, "draft_for_review", default_reason, checks, None
+    return draft_candidate, "draft_for_review", default_reason, None, checks, None
 
 
 def _build_sanitized_post_draft_diagnostics(
     *,
     draft_candidate: Mapping[str, Any],
-    all_safe_sources: tuple[dict[str, Any], ...],
-    verified_claims: list[dict[str, Any]],
+    grounding_inspection: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Capture and redact withheld draft claims, unsupported points, and failed clauses."""
+    """Capture and redact withheld draft claims, unsupported points, and failed claims."""
     claims = list(draft_candidate["claims"])
-    grounding_inspection = inspect_claim_grounding(
-        claims,
-        all_safe_sources,
-        verified_claims=verified_claims,
-    )
     raw_diagnostics = {
         "withheld_claims": [
             {
@@ -805,8 +890,8 @@ def _build_sanitized_post_draft_diagnostics(
         ],
         "unsupported_points": list(draft_candidate["unsupported_points"]),
         "conflicting_points": list(draft_candidate["conflicting_points"]),
-        "failed_claims": grounding_inspection["failed_claims"],
-        "minimum_ratio": grounding_inspection["minimum_ratio"],
+        "failed_claims": list(grounding_inspection.get("failed_claims") or []),
+        "minimum_ratio": grounding_inspection.get("minimum_ratio"),
     }
     sanitized_diagnostics, _, _ = sanitize_handoff_content(raw_diagnostics)
     return sanitized_diagnostics  # type: ignore[return-value]

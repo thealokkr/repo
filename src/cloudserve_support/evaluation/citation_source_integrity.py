@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from cloudserve_support.guardrails.draft_safety import _text_supports_claim
+from cloudserve_support.guardrails.draft_safety import _failed_text_support_clauses
 
 
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -75,6 +76,7 @@ def evaluate_citation_source_integrity(
         result_is_same_run = result.get("run_id") == run_id
         if not result_is_same_run:
             _increment(failure_counts, "cross_run_result")
+        in_run_grounding_passed = _in_run_citation_grounding_passed(result)
 
         sources_by_id: dict[str, dict[str, Any]] = {}
         source_rows = result.get("sources", [])
@@ -128,6 +130,7 @@ def evaluate_citation_source_integrity(
                 and isinstance(claim_text, str)
                 and bool(claim_text.strip())
             )
+            resolved_source_ids: list[str] = []
             for citation in citation_rows:
                 if not isinstance(citation, dict):
                     _increment(failure_counts, "invalid_citation_record")
@@ -144,6 +147,8 @@ def evaluate_citation_source_integrity(
                 )
                 if citation_resolves:
                     resolved_citation_count += 1
+                    if isinstance(passage_id, str) and passage_id not in resolved_source_ids:
+                        resolved_source_ids.append(passage_id)
                 else:
                     _increment(
                         failure_counts,
@@ -167,10 +172,20 @@ def evaluate_citation_source_integrity(
                 )
                 if excerpt_matches:
                     exact_excerpt_pair_count += 1
+
+            # Trust in-run citation_grounding only when it ran and passed; otherwise enforce
+            # the deterministic sentence-level union-of-cited-sources check.
+            if resolved_source_ids and not in_run_grounding_passed:
                 claim_supported = (
                     isinstance(claim_text, str)
-                    and isinstance(passage_text, str)
-                    and _text_supports_claim(claim_text, passage_text, min_ratio=0.35)
+                    and bool(claim_text.strip())
+                    and _failed_text_support_clauses(
+                        claim_text,
+                        source_ids=resolved_source_ids,
+                        sources_by_id=sources_by_id,
+                        min_ratio=0.65,
+                    )
+                    is None
                 )
                 if not claim_supported:
                     _increment(failure_counts, "claim_excerpt_mismatch")
@@ -260,6 +275,24 @@ def evaluate_citation_source_integrity(
             "They do not establish semantic citation support, whole-answer correctness, or hallucination."
         ),
     }
+
+
+def _in_run_citation_grounding_passed(result: Mapping[str, Any]) -> bool:
+    """Return True only when persisted guardrails show citation_grounding ran and passed."""
+    guardrails = result.get("guardrails")
+    if not isinstance(guardrails, Mapping):
+        return False
+    checks = guardrails.get("checks")
+    if not isinstance(checks, list):
+        return False
+    return any(
+        isinstance(check, Mapping)
+        and check.get("check") == "citation_grounding"
+        and check.get("passed") is True
+        and check.get("blocked") is False
+        and check.get("action") == "continue"
+        for check in checks
+    )
 
 
 def _is_generated_draft(result: dict[str, Any]) -> bool:

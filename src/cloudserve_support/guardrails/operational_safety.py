@@ -25,20 +25,6 @@ _IGNORED_CONTEXT_KEYS = frozenset(
 
 _PROTECTED_PHRASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
-        "data_location",
-        (
-            "data location",
-            "data residency",
-            "where is our data",
-            "where is the data",
-            "where data is stored",
-            "data stored in which region",
-            "which region stores",
-            "backup region",
-            "backups replicated outside our primary region",
-        ),
-    ),
-    (
         "compliance",
         (
             "compliance",
@@ -90,6 +76,8 @@ _PROTECTED_PHRASES: tuple[tuple[str, tuple[str, ...]], ...] = (
         "feature_request",
         (
             "feature request",
+            "would be very useful",
+            "would be useful to",
             "would be useful to add",
             "please add",
             "can you add",
@@ -101,11 +89,19 @@ _PROTECTED_PHRASES: tuple[tuple[str, tuple[str, ...]], ...] = (
         "security",
         (
             "security",
-            "exposed key",
-            "key to a public repository",
-            "secrets in the logs",
-            "credentials leaked",
             "security incident",
+            "suspicious activity",
+            "address none of us recognise",
+            "address none of us recognize",
+            "unrecognized address",
+            "unrecognised address",
+            "credentials may have been exposed",
+            "exposed in a breach",
+            "exposed in breach",
+            "breach at another service",
+            "secrets in the logs",
+            "secrets in logs",
+            "credentials leaked",
         ),
     ),
 )
@@ -179,12 +175,6 @@ def detect_protected_intent(text: str) -> str | None:
     for intent, phrases in _PROTECTED_PHRASES:
         if any(_has_phrase(normalized, phrase) for phrase in phrases):
             return intent
-    if (
-        "data" in normalized
-        and any(term in normalized for term in ("where", "region", "residency"))
-        and any(term in normalized for term in ("stored", "storage", "hosted", "located"))
-    ):
-        return "data_location"
     if (
         ("audit log" in normalized or "audit trail" in normalized)
         and any(term in normalized for term in ("access", "read", "record", "logged"))

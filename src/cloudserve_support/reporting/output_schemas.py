@@ -654,6 +654,7 @@ POLICY_CHECK_SCHEMA = {
         },
         "status": {"enum": ["passed", "failed", "skipped"]},
         "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "noul": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
         "reason": {"type": "string", "minLength": 1},
         "matched_rule": {"type": ["string", "null"], "minLength": 1},
         "protected_case": {"type": "boolean"},
@@ -856,6 +857,8 @@ GENERATION_SCHEMA = {
         "reasoning_effort": {"type": ["string", "null"]},
         "status": {"enum": ["not_attempted", "generated", "failed"]},
         "error_code": {"type": ["string", "null"]},
+        "skip_draft": {"type": "boolean"},
+        "skip_draft_review": {"type": "boolean"},
     },
 }
 OUTPUT_SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
@@ -996,9 +999,29 @@ OUTPUT_SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
                     "properties": {"predicted_route": {"const": "draft_for_review"}},
                 },
                 "then": {
-                    "properties": {
-                        "draft": DRAFT_SCHEMA,
-                        "handoff": {"type": "null"},
+                    "if": {
+                        "required": ["generation"],
+                        "properties": {
+                            "generation": {
+                                "required": ["status", "skip_draft"],
+                                "properties": {
+                                    "status": {"const": "not_attempted"},
+                                    "skip_draft": {"const": True},
+                                },
+                            },
+                        },
+                    },
+                    "then": {
+                        "properties": {
+                            "draft": {"type": "null"},
+                            "handoff": {"type": "null"},
+                        },
+                    },
+                    "else": {
+                        "properties": {
+                            "draft": DRAFT_SCHEMA,
+                            "handoff": {"type": "null"},
+                        },
                     },
                 },
             },
@@ -1026,6 +1049,21 @@ OUTPUT_SCHEMA_DEFINITIONS: dict[str, dict[str, Any]] = {
                         "properties": {
                             "draft": {"type": "null"},
                             "handoff": HANDOFF_SCHEMA,
+                        },
+                    },
+                    {
+                        "required": ["predicted_route", "generation"],
+                        "properties": {
+                            "predicted_route": {"const": "draft_for_review"},
+                            "draft": {"type": "null"},
+                            "handoff": {"type": "null"},
+                            "generation": {
+                                "required": ["status", "skip_draft"],
+                                "properties": {
+                                    "status": {"const": "not_attempted"},
+                                    "skip_draft": {"const": True},
+                                },
+                            },
                         },
                     },
                 ],

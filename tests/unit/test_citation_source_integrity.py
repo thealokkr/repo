@@ -1117,3 +1117,355 @@ def test_citation_integrity_fails_unresolved_unapproved_and_expired_kb_articles(
     )
     assert infinitive_report["claim_traceability"]["value"] == 0.0
     assert infinitive_report["failure_counts"]["claim_excerpt_mismatch"] == 1
+
+
+def test_claims_free_policy_evaluation_enforces_source_article_grounding() -> None:
+    """Verify claims-free policy_evaluation drafts pass when grounded and escalate when unsupported."""
+    snapshots, source_sha256, manifest_sha256 = _real_kb_snapshots()
+    acct_snapshot = snapshots["DOC-ACCT-001"]
+    sec_snapshot = {
+        **snapshots["DOC-SEC-001"],
+        "similarity": None,
+        "minimum_similarity": None,
+    }
+    ticket = CanonicalTicket(
+        ticket_id="DEV-CLAIMS-FREE",
+        has_ticket_id=True,
+        channel="email",
+        subject="Access check",
+        body="How do I check permissions?",
+        received_at=None,
+        customer_tier="team",
+        language_fluency=None,
+        context={},
+    )
+    retrieval = RetrievalResult(
+        status="ready",
+        reason_code="relevant_sources_found",
+        reason="Retrieved approved documentation.",
+        sources=(acct_snapshot,),
+        related_sources=(sec_snapshot,),
+        eligible_candidate_count=1,
+        excluded_candidate_counts={},
+        minimum_similarity=MINIMUM_SIMILARITY,
+        embedding_model="gemini-embedding-001",
+        source_sha256=source_sha256,
+        metadata_manifest_sha256=manifest_sha256,
+    )
+    classification = TicketClassification(
+        intent="account_access",
+        urgency="medium",
+        confidence=0.95,
+        provider="gemini",
+        model_name=DECISIONS_CLASSIFIER_MODEL,
+        provider_status="classified",
+    )
+    claims_free_policy = {
+        "ticket": {"ticket_id": ticket.ticket_id, "subject": ticket.subject},
+        "checks": [
+            {
+                "name": "claim_grounding_check",
+                "status": "passed",
+                "confidence": 0.94,
+                "reason": "Supported.",
+            }
+        ],
+        "final_decision": {
+            "route": "draft_for_review",
+            "matched_rule": "all_routing_policy_checks_passed",
+            "protected_case": False,
+            "evidence_ready": True,
+            "reason": "Supported.",
+        },
+    }
+
+    class FixedDraftGenerator:
+        name = "offline"
+        last_request_duration_seconds = 0.01
+
+        def __init__(self, draft_payload: dict[str, Any]) -> None:
+            self._draft_payload = draft_payload
+
+        def generate_draft(
+            self,
+            call_ticket: CanonicalTicket,
+            *,
+            sources: tuple[dict[str, Any], ...],
+            related_sources: tuple[dict[str, Any], ...] = (),
+            policy_evaluation: dict[str, Any] | None = None,
+            model_name: str = "",
+        ) -> dict[str, Any]:
+            del call_ticket, sources, related_sources, policy_evaluation, model_name
+            return self._draft_payload
+
+    grounded_draft = {
+        "plain_text": "Check the effective permissions view to see directly assigned roles and group memberships.",
+        "claims": [
+            {
+                "text": "Check the effective permissions view to see directly assigned roles and group memberships.",
+                "source_ids": [acct_snapshot["passage_id"]],
+                "citations": [
+                    {
+                        "passage_id": acct_snapshot["passage_id"],
+                        "source_ref": acct_snapshot["source_ref"],
+                    }
+                ],
+            }
+        ],
+        "unsupported_points": [],
+        "conflicting_points": [],
+        "approval_required": True,
+        "send_status": "not_sent",
+    }
+    passed_outcome = build_ticket_outcome(
+        run_id=RUN_ID,
+        input_index=0,
+        ticket=ticket,
+        classification=classification,
+        retrieval=retrieval,
+        decision=RoutingDecision(
+            route="draft_for_review",
+            matched_rule="all_routing_policy_checks_passed",
+            protected_case=False,
+            evidence_ready=True,
+            reason="Supported.",
+        ),
+        policy_evaluation=claims_free_policy,
+        policy=load_frozen_routing_policy(DEFAULT_ROUTING_POLICY_CONFIG_PATH),
+        policy_file_fingerprint=fingerprint_policy_file(DEFAULT_ROUTING_POLICY_CONFIG_PATH),
+        classifier_implementation_fingerprint=fingerprint_classifier_implementation(),
+        settings=Settings(draft_generation_provider="OFFLINE"),
+        generator=FixedDraftGenerator(grounded_draft),
+        issues=[],
+        duplicate_ticket_id=False,
+    )
+    assert passed_outcome["route"] == "draft_for_review"
+    assert passed_outcome["draft"] is not None
+
+    unsupported_draft = {
+        **grounded_draft,
+        "plain_text": "We have already reset your password and issued a refund.",
+        "claims": [
+            {
+                "text": "We have already reset your password and issued a refund.",
+                "source_ids": [acct_snapshot["passage_id"]],
+                "citations": [
+                    {
+                        "passage_id": acct_snapshot["passage_id"],
+                        "source_ref": acct_snapshot["source_ref"],
+                    }
+                ],
+            }
+        ],
+    }
+    escalated_outcome = build_ticket_outcome(
+        run_id=RUN_ID,
+        input_index=1,
+        ticket=ticket,
+        classification=classification,
+        retrieval=retrieval,
+        decision=RoutingDecision(
+            route="draft_for_review",
+            matched_rule="all_routing_policy_checks_passed",
+            protected_case=False,
+            evidence_ready=True,
+            reason="Supported.",
+        ),
+        policy_evaluation=claims_free_policy,
+        policy=load_frozen_routing_policy(DEFAULT_ROUTING_POLICY_CONFIG_PATH),
+        policy_file_fingerprint=fingerprint_policy_file(DEFAULT_ROUTING_POLICY_CONFIG_PATH),
+        classifier_implementation_fingerprint=fingerprint_classifier_implementation(),
+        settings=Settings(draft_generation_provider="OFFLINE"),
+        generator=FixedDraftGenerator(unsupported_draft),
+        issues=[],
+        duplicate_ticket_id=False,
+    )
+    assert escalated_outcome["route"] == "escalate"
+    assert escalated_outcome["draft"] is None
+    assert escalated_outcome["post_draft_diagnostics"]["failed_claims"]
+
+
+def _citation_grounding_guardrails(*, action: str) -> dict[str, Any]:
+    """Build persisted guardrails metadata for citation_grounding."""
+    return {
+        "checks": [
+            {
+                "check": "citation_grounding",
+                "passed": True,
+                "blocked": False,
+                "action": action,
+                "evidence": "test citation grounding",
+            }
+        ]
+    }
+
+
+def test_in_run_verified_paraphrase_numeral_comma_list_and_multi_source_claims_score_one() -> None:
+    """AC-1: In-run verified claims with numerals, comma lists, and 2-article synthesis score 1.0."""
+    snapshots, _, _ = _real_kb_snapshots()
+    acct_snapshot = snapshots["DOC-ACCT-001"]
+    sec_snapshot = snapshots["DOC-SEC-001"]
+
+    result = {
+        "run_id": RUN_ID,
+        "input_index": 0,
+        "ticket_id": "VERIFIED-PARAPHRASE",
+        "route": "draft_for_review",
+        "generation": {"status": "generated"},
+        "guardrails": _citation_grounding_guardrails(action="continue"),
+        "draft": {
+            "claims": [
+                {
+                    "text": (
+                        "You can configure up to two hundred workspace roles, "
+                        "inspecting direct assignments, inherited groups, and custom scopes."
+                    ),
+                    "source_ids": [acct_snapshot["passage_id"]],
+                    "citations": [
+                        {
+                            "passage_id": acct_snapshot["passage_id"],
+                            "source_ref": acct_snapshot["source_ref"],
+                        }
+                    ],
+                },
+                {
+                    "text": (
+                        "Check effective permissions in the account console and correlate "
+                        "recent role updates in the security audit log."
+                    ),
+                    "source_ids": [
+                        acct_snapshot["passage_id"],
+                        sec_snapshot["passage_id"],
+                    ],
+                    "citations": [
+                        {
+                            "passage_id": acct_snapshot["passage_id"],
+                            "source_ref": acct_snapshot["source_ref"],
+                        },
+                        {
+                            "passage_id": sec_snapshot["passage_id"],
+                            "source_ref": sec_snapshot["source_ref"],
+                        },
+                    ],
+                },
+            ]
+        },
+        "sources": [acct_snapshot, sec_snapshot],
+    }
+
+    report = evaluate_citation_source_integrity(
+        run_id=RUN_ID,
+        results=[result],
+        labels_by_index={0: {"expected_doc_ids": ["DOC-ACCT-001", "DOC-SEC-001"]}},
+        evaluated_at=CHECKED_AT,
+    )
+
+    assert report["claim_count"] == 2
+    assert report["citation_count"] == 3
+    assert report["citation_resolution"]["numerator"] == report["citation_count"]
+    assert report["eligible_source_provenance"]["numerator"] == report["citation_count"]
+    assert report["claim_traceability"]["numerator"] == report["claim_count"]
+    assert report["claim_traceability"]["value"] == 1.0
+    assert report["failure_counts"] == {}
+    assert Draft202012Validator(CITATION_SOURCE_INTEGRITY_SCHEMA).is_valid(report)
+
+
+def test_skipped_in_run_grounding_enforces_sentence_union_and_catches_fabrication() -> None:
+    """AC-2: --skip-draft-review (action='skipped') still flags fabricated sentences."""
+    snapshots, _, _ = _real_kb_snapshots()
+    acct_snapshot = snapshots["DOC-ACCT-001"]
+
+    skipped_result = _draft_result(
+        ticket_id="SKIPPED-FABRICATED",
+        input_index=0,
+        claim_text=(
+            "Check the effective permissions view to see directly assigned roles and "
+            "group memberships. Refunds are automatically credited within 24 hours."
+        ),
+        source=acct_snapshot,
+    )
+    skipped_result["guardrails"] = _citation_grounding_guardrails(action="skipped")
+
+    report = evaluate_citation_source_integrity(
+        run_id=RUN_ID,
+        results=[skipped_result],
+        labels_by_index={0: {"expected_doc_ids": ["DOC-ACCT-001"]}},
+        evaluated_at=CHECKED_AT,
+    )
+
+    assert report["failure_counts"]["claim_excerpt_mismatch"] >= 1
+    assert report["claim_traceability"]["numerator"] < report["claim_count"]
+    assert report["claim_traceability"]["numerator"] == 0
+
+
+def test_deterministic_citation_failures_still_fail_even_when_in_run_grounding_passed() -> None:
+    """AC-3: Unresolved, cross-run, DOC-AUTH-003, and DOC-DEPLOY-002 fail even with passed guardrails."""
+    snapshots, _, _ = _real_kb_snapshots()
+    acct_snapshot = snapshots["DOC-ACCT-001"]
+    unapproved_auth = snapshots["DOC-AUTH-003"]
+    expired_deploy = snapshots["DOC-DEPLOY-002"]
+    stale_acct = {**acct_snapshot, "reviewed_at": "2020-01-01"}
+    passed_guardrails = _citation_grounding_guardrails(action="continue")
+
+    unresolved_result = _draft_result(
+        ticket_id="UNRESOLVED-PASSED-GUARDRAIL",
+        input_index=0,
+        claim_text="Check your workspace settings.",
+        source=None,
+        include_citation=False,
+    )
+    unresolved_result["guardrails"] = passed_guardrails
+    unresolved_result["draft"]["claims"][0]["source_ids"] = ["DOC-MISSING:article:0"]
+    unresolved_result["draft"]["claims"][0]["citations"] = [
+        {
+            "passage_id": "DOC-MISSING:article:0",
+            "source_ref": "data/kb/documentation.json#DOC-MISSING#Article",
+        }
+    ]
+
+    cross_run_result = _draft_result(
+        ticket_id="CROSS-RUN-PASSED-GUARDRAIL",
+        input_index=1,
+        claim_text="Check the effective permissions view.",
+        source=acct_snapshot,
+        run_id="b" * 32,
+    )
+    cross_run_result["guardrails"] = passed_guardrails
+
+    unapproved_result = _draft_result(
+        ticket_id="UNAPPROVED-PASSED-GUARDRAIL",
+        input_index=2,
+        claim_text="Enable SSO with SAML.",
+        source=unapproved_auth,
+    )
+    unapproved_result["guardrails"] = passed_guardrails
+
+    expired_result = _draft_result(
+        ticket_id="EXPIRED-PASSED-GUARDRAIL",
+        input_index=3,
+        claim_text="Rollback your deployment.",
+        source=expired_deploy,
+    )
+    expired_result["guardrails"] = passed_guardrails
+
+    stale_result = _draft_result(
+        ticket_id="STALE-PASSED-GUARDRAIL",
+        input_index=4,
+        claim_text="Check the effective permissions view.",
+        source=stale_acct,
+    )
+    stale_result["guardrails"] = passed_guardrails
+
+    report = evaluate_citation_source_integrity(
+        run_id=RUN_ID,
+        results=[unresolved_result, cross_run_result, unapproved_result, expired_result, stale_result],
+        labels_by_index={index: {"expected_doc_ids": []} for index in range(5)},
+        evaluated_at=CHECKED_AT,
+    )
+
+    assert report["claim_traceability"]["numerator"] == 0
+    assert report["failure_counts"]["unresolved_citation"] == 1
+    assert report["failure_counts"]["cross_run_citation"] == 1
+    assert report["failure_counts"]["cross_run_result"] == 1
+    assert report["failure_counts"]["source_not_approved"] == 2
+    assert report["failure_counts"]["stale_source_snapshot"] == 1

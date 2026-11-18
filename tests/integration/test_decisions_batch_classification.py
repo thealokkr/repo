@@ -20,9 +20,17 @@ from cloudserve_support.classification.ticket_classification import (
     INTENT_VALUES,
     URGENCY_CRITERIA,
     URGENCY_VALUES,
+    ClassificationOutputError,
     _ticket_batch_input,
+    _ticket_batch_questions,
     _ticket_classification_chunks,
+    classification_failure,
     classify_ticket_batches,
+    parse_decision_classifications,
+)
+from cloudserve_support.domain.ticket_classification_vocabulary import (
+    CLASSIFIER_INTENT_CHOICES,
+    CLASSIFIER_URGENCY_CHOICES,
 )
 from cloudserve_support.config import Settings
 from cloudserve_support.ingestion.ticket_normalization import normalize_ticket_record
@@ -235,27 +243,152 @@ def test_decisions_classifier_splits_before_serialized_input_byte_limit(
 
 
 def test_classification_criteria_and_owner_urgency_rubric() -> None:
-    """Verify criteria dictionary contracts and owner-confirmed urgency rubric boundaries."""
-    assert set(INTENT_CRITERIA.keys()) == INTENT_VALUES
-    assert set(URGENCY_CRITERIA.keys()) == URGENCY_VALUES
+    """Verify 22-intent / 3-urgency vocabulary subsets, shared rubric input, and development-aligned criteria."""
+    assert len(CLASSIFIER_INTENT_CHOICES) == 22
+    assert CLASSIFIER_INTENT_CHOICES < INTENT_VALUES
+    assert CLASSIFIER_URGENCY_CHOICES == frozenset({"high", "medium", "low"})
+    assert CLASSIFIER_URGENCY_CHOICES < URGENCY_VALUES
+    assert "unknown" in URGENCY_VALUES
+    assert "unknown" not in CLASSIFIER_URGENCY_CHOICES
 
-    # Owner-confirmed urgency rubric boundaries
-    high_criterion = URGENCY_CRITERIA["high"]
-    assert "critical customer-facing outage" in high_criterion.lower()
-    assert "active security incident" in high_criterion.lower()
-    assert "account compromise" in high_criterion.lower()
-    assert "confirmed data loss or exposure" in high_criterion.lower()
-    assert "suspected exposure or compromise of credentials in a breach at another service" in high_criterion.lower()
+    assert set(INTENT_CRITERIA.keys()) == CLASSIFIER_INTENT_CHOICES
+    assert set(URGENCY_CRITERIA.keys()) == CLASSIFIER_URGENCY_CHOICES
+    assert [choice["value"] for choice in CLASSIFICATION_DECISION_QUESTIONS[0]["choices"]] == sorted(
+        CLASSIFIER_INTENT_CHOICES
+    )
+    assert [choice["value"] for choice in CLASSIFICATION_DECISION_QUESTIONS[1]["choices"]] == sorted(
+        CLASSIFIER_URGENCY_CHOICES
+    )
 
-    medium_criterion = URGENCY_CRITERIA["medium"]
-    assert "bounded api key permission or access issues" in medium_criterion.lower()
+    # Feature request vs quota_or_overage distinction
+    assert "spend caps" in INTENT_CRITERIA["feature_request"].lower()
+    assert "not unimplemented spend-cap features" in INTENT_CRITERIA["quota_or_overage"].lower()
 
-    low_criterion = URGENCY_CRITERIA["low"]
-    assert "routine invoice or billing" in low_criterion.lower()
-    assert "routine data-residency" in low_criterion.lower()
+    # Development-aligned urgency rubric boundaries
+    high_criterion = URGENCY_CRITERIA["high"].lower()
+    assert "rollback_request" in high_criterion
+    assert "security_incident" in high_criterion
+    assert "publicly exposed production api keys" in high_criterion
+    assert "doubled p95" in high_criterion
+    assert "blocked production deployments" in high_criterion
 
-    urgency_instructions = CLASSIFICATION_DECISION_QUESTIONS[1]["instructions"]
-    assert "routine invoice and data-residency questions are not high" in urgency_instructions.lower()
-    assert "suspected exposure or compromise of credentials in a breach at another service" in urgency_instructions.lower()
-    assert "even before confirmed misuse" in urgency_instructions.lower()
+    medium_criterion = URGENCY_CRITERIA["medium"].lower()
+    assert "unexpected or unfamiliar invoice or overage charges" in medium_criterion
+    assert "data_residency" in medium_criterion
+    assert "secrets in logs" in medium_criterion
+    assert "unclear_request" in medium_criterion
+
+    low_criterion = URGENCY_CRITERIA["low"].lower()
+    assert "onboarding" in low_criterion
+    assert "api pagination or rate-limit inquiries" in low_criterion
+    assert "routine billing-period or payment-method" in low_criterion
+
+    urgency_instructions = CLASSIFICATION_DECISION_QUESTIONS[1]["instructions"].lower()
+    assert "routine invoice and data-residency questions are not high" in urgency_instructions
+    assert "suspected exposure or compromise of credentials in a breach at another service" in urgency_instructions
+    assert "even before confirmed misuse" in urgency_instructions
+
+
+def test_25_ticket_batch_request_uses_22_intents_3_urgencies_and_shared_rubric() -> None:
+    """AC-1: Verify 25-ticket request presents 22 intent and 3 urgency choices with shared rubric in input."""
+    tickets = tuple(
+        normalize_ticket_record(
+            {
+                "ticket_id": f"AC1-{index:02d}",
+                "channel": "email",
+                "subject": f"Subject {index}",
+                "body": f"Body {index}",
+            },
+            input_index=index,
+        )
+        for index in range(25)
+    )
+    batch_input_raw = _ticket_batch_input(tickets)
+    batch_input = json.loads(batch_input_raw)
+    questions = _ticket_batch_questions(len(tickets))
+
+    assert len(batch_input_raw.encode("utf-8")) <= DECISIONS_MAX_INPUT_BYTES
+    assert len(questions) == 50
+    assert len(questions) <= DECISIONS_MAX_QUESTIONS
+    assert len(json.dumps(questions).encode("utf-8")) < 100_000
+
+    assert set(batch_input["intent_rubric"].keys()) == CLASSIFIER_INTENT_CHOICES
+    assert set(batch_input["urgency_rubric"].keys()) == CLASSIFIER_URGENCY_CHOICES
+    assert len(batch_input["tickets"]) == 25
+
+    for ticket_index in range(25):
+        intent_q = questions[f"ticket_{ticket_index}_intent"]
+        urgency_q = questions[f"ticket_{ticket_index}_urgency"]
+        assert set(intent_q["criteria"].keys()) == CLASSIFIER_INTENT_CHOICES
+        assert len(intent_q["criteria"]) == 22
+        assert set(urgency_q["criteria"].keys()) == CLASSIFIER_URGENCY_CHOICES
+        assert "unknown" not in urgency_q["criteria"]
+
+
+def test_parse_and_batch_reject_unknown_urgency_and_umbrella_intents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-2: Reject non-choice unknown urgency or umbrella intents while preserving fallback."""
+    valid_decision = SimpleNamespace(
+        model=DECISIONS_CLASSIFIER_MODEL,
+        answers=[
+            SimpleNamespace(type="choice", name="ticket_0_intent", choice="feature_request", confidence=0.91),
+            SimpleNamespace(type="choice", name="ticket_0_urgency", choice="low", confidence=0.89),
+        ],
+    )
+    parsed = parse_decision_classifications(valid_decision, ticket_count=1)
+    assert len(parsed) == 1
+    assert parsed[0].intent == "feature_request"
+    assert parsed[0].urgency == "low"
+    assert parsed[0].provider_status == "classified"
+
+    unknown_urgency_decision = SimpleNamespace(
+        model=DECISIONS_CLASSIFIER_MODEL,
+        answers=[
+            SimpleNamespace(type="choice", name="ticket_0_intent", choice="configuration_help", confidence=0.9),
+            SimpleNamespace(type="choice", name="ticket_0_urgency", choice="unknown", confidence=0.9),
+        ],
+    )
+    with pytest.raises(ClassificationOutputError):
+        parse_decision_classifications(unknown_urgency_decision, ticket_count=1)
+
+    umbrella_intent_decision = SimpleNamespace(
+        model=DECISIONS_CLASSIFIER_MODEL,
+        answers=[
+            SimpleNamespace(type="choice", name="ticket_0_intent", choice="billing", confidence=0.9),
+            SimpleNamespace(type="choice", name="ticket_0_urgency", choice="medium", confidence=0.9),
+        ],
+    )
+    with pytest.raises(ClassificationOutputError):
+        parse_decision_classifications(umbrella_intent_decision, ticket_count=1)
+
+    class BadChoiceDecisionsApi:
+        def create(self, **request: object) -> object:
+            return umbrella_intent_decision
+
+    class BadChoiceClient:
+        def __init__(self, **options: object) -> None:
+            self.decisions = BadChoiceDecisionsApi()
+
+    monkeypatch.setattr(genai, "Client", BadChoiceClient)
+    ticket = normalize_ticket_record(
+        {
+            "ticket_id": "AC2-FALLBACK",
+            "channel": "email",
+            "subject": "Invoice question",
+            "body": "Why is this month's invoice higher?",
+        },
+        input_index=0,
+    )
+    batches = classify_ticket_batches((ticket,), Settings(gemini_api_key="local-test-key"))
+    assert len(batches) == 1
+    assert batches[0].classifications[0].provider_status == "fallback"
+    assert batches[0].classifications[0].intent == "unclear_request"
+    assert batches[0].classifications[0].urgency == "unknown"
+
+    fallback = classification_failure(uncertainty="provider unavailable")
+    assert fallback.intent == "unclear_request"
+    assert fallback.urgency == "unknown"
+    assert fallback.confidence == 0.0
+    assert fallback.provider_status == "fallback"
 

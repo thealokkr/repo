@@ -7,7 +7,7 @@ import re
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -24,10 +24,14 @@ from cloudserve_support.generation.draft_generation import (
     GENERATION_PROMPT_VERSION,
     DraftGenerationProvider,
     create_draft_generation_provider,
+    validate_generated_draft,
 )
 from cloudserve_support.guardrails.draft_safety import (
+    GeminiPostDraftClaimVerifier,
+    PostDraftClaimVerificationError,
     contains_private_data,
     contains_prompt_injection,
+    create_post_draft_claim_verifier,
     filter_evaluation_context,
     ticket_text_for_generation,
 )
@@ -100,6 +104,8 @@ class _PreparedTicket:
     policy_evaluation: dict[str, Any] | None = None
     pre_routing_safety: PreRoutingSafetyEvaluation | None = None
     classification_request_duration_seconds: float = 0.0
+    precomputed_draft_attempt: tuple[dict[str, Any] | None, float, Exception | None] | None = None
+    precomputed_claim_grounding: dict[str, Any] | PostDraftClaimVerificationError | None = None
 
 
 def run_ticket_batch(
@@ -113,6 +119,7 @@ def run_ticket_batch(
     skip_draft_review: bool = False,
     retriever: KnowledgeRetriever | None = None,
     generator: DraftGenerationProvider | None = None,
+    post_draft_verifier: GeminiPostDraftClaimVerifier | None = None,
     progress_callback: Callable[[str, str], None] | None = None,
 ) -> tuple[str, Path, dict[str, Any]]:
     """Classify, retrieve, draft or hand off, and persist every ticket occurrence."""
@@ -258,9 +265,15 @@ def run_ticket_batch(
         _report_run_progress(progress_callback, "Retrieval", "done")
 
         _report_run_progress(progress_callback, "Routing", "in_progress")
+        grounding_checker = create_claim_grounding_checker(settings)
         routing_evaluator = RoutingPolicyEvaluator(
             policy,
-            claim_grounding_fn=create_claim_grounding_checker(settings),
+            claim_grounding_fn=grounding_checker,
+        )
+        batched_evaluations = _precompute_batched_routing_evaluations(
+            prepared_tickets=prepared_tickets,
+            routing_evaluator=routing_evaluator,
+            grounding_checker=grounding_checker,
         )
         for routing_position, prepared_ticket in enumerate(prepared_tickets, start=1):
             routing_progress_label = (
@@ -283,12 +296,16 @@ def run_ticket_batch(
             retrieval = prepared_ticket.retrieval
             if retrieval is None:
                 raise RuntimeError("Ticket retrieval phase did not resolve every input position.")
-            policy_evaluation = route_ticket_classification(
-                routing_evaluator,
-                ticket=prepared_ticket.ticket,
-                classification=classification.as_dict(),
-                retrieval=retrieval,
-                pre_provider_guardrail_blocked=prepared_ticket.pre_provider_guardrail_block,
+            policy_evaluation = (
+                batched_evaluations[routing_position - 1]
+                if batched_evaluations is not None
+                else route_ticket_classification(
+                    routing_evaluator,
+                    ticket=prepared_ticket.ticket,
+                    classification=classification.as_dict(),
+                    retrieval=retrieval,
+                    pre_provider_guardrail_blocked=prepared_ticket.pre_provider_guardrail_block,
+                )
             )
             prepared_ticket.policy_evaluation = policy_evaluation
             prepared_ticket.decision = RoutingPolicyEvaluator.to_routing_decision(
@@ -312,7 +329,7 @@ def run_ticket_batch(
                 status="decided",
                 value=policy_evaluation,
                 reason=decision.reason,
-                model_name=settings.llm_model if used_gemini_grounding else None,
+                model_name=DECISIONS_CLASSIFIER_MODEL if used_gemini_grounding else None,
                 prompt_version=(
                     CLAIM_GROUNDING_PROMPT_VERSION if used_gemini_grounding else None
                 ),
@@ -353,6 +370,19 @@ def run_ticket_batch(
         def report_ticket_step(step: str) -> None:
             _report_run_progress(progress_callback, step, "ticket_step")
 
+        resolved_post_draft_verifier = (
+            post_draft_verifier
+            if post_draft_verifier is not None
+            else create_post_draft_claim_verifier(settings)
+        )
+        if not skip_draft and not skip_draft_review and resolved_post_draft_verifier is not None:
+            _precompute_batched_post_draft_results(
+                prepared_tickets=prepared_tickets,
+                settings=settings,
+                generator=draft_generator,
+                post_draft_verifier=resolved_post_draft_verifier,
+            )
+
         for ticket_position, prepared_ticket in enumerate(prepared_tickets, start=1):
             ticket = prepared_ticket.ticket
             _report_run_progress(
@@ -382,6 +412,7 @@ def run_ticket_batch(
                 generator=draft_generator,
                 skip_draft=skip_draft,
                 skip_draft_review=skip_draft_review,
+                post_draft_verifier=resolved_post_draft_verifier,
                 ticket_step_callback=(
                     report_ticket_step if progress_callback is not None else None
                 ),
@@ -564,6 +595,66 @@ def _commit_ticket_records(connection: sqlite3.Connection) -> None:
     connection.commit()
 
 
+def _precompute_batched_routing_evaluations(
+    *,
+    prepared_tickets: Sequence[_PreparedTicket],
+    routing_evaluator: RoutingPolicyEvaluator,
+    grounding_checker: Any,
+) -> list[dict[str, Any]] | None:
+    """Batch pre-draft grounding across surviving tickets when the checker supports evaluate_batch."""
+    evaluate_batch = getattr(grounding_checker, "evaluate_batch", None)
+    if not callable(evaluate_batch):
+        return None
+
+    pre_results: list[tuple[dict[str, Any] | None, dict[str, Any] | None]] = []
+    surviving_indices: list[int] = []
+    batch_requests: list[tuple[CanonicalTicket, Sequence[dict[str, Any]], Sequence[dict[str, Any]]]] = []
+    for idx, prepared_ticket in enumerate(prepared_tickets):
+        classification = prepared_ticket.classification
+        if classification is None:
+            classification = classification_failure(
+                provider="not_attempted",
+                model_name=DECISIONS_CLASSIFIER_MODEL,
+                uncertainty="Ticket was not included in a Decisions classification batch.",
+            )
+            prepared_ticket.classification = classification
+        retrieval = prepared_ticket.retrieval
+        if retrieval is None:
+            raise RuntimeError("Ticket retrieval phase did not resolve every input position.")
+        short_circuit, grounding_context = routing_evaluator.evaluate_pre_grounding(
+            ticket=prepared_ticket.ticket,
+            classification=classification.as_dict(),
+            retrieval=retrieval,
+            pre_provider_guardrail_blocked=prepared_ticket.pre_provider_guardrail_block,
+        )
+        pre_results.append((short_circuit, grounding_context))
+        if grounding_context is not None:
+            surviving_indices.append(idx)
+            batch_requests.append(
+                (
+                    grounding_context["canonical_ticket"],
+                    grounding_context["safe_primary_sources"],
+                    grounding_context["safe_related_sources"],
+                )
+            )
+
+    grounding_outcomes = evaluate_batch(batch_requests) if batch_requests else []
+    outcome_by_idx = dict(zip(surviving_indices, grounding_outcomes, strict=True))
+    evaluations: list[dict[str, Any]] = []
+    for idx, (short_circuit, grounding_context) in enumerate(pre_results):
+        if short_circuit is not None:
+            evaluations.append(short_circuit)
+        else:
+            assert grounding_context is not None
+            evaluations.append(
+                routing_evaluator.finalize_with_grounding(
+                    grounding_context,
+                    grounding_outcome=outcome_by_idx[idx],
+                )
+            )
+    return evaluations
+
+
 def route_ticket_classification(
     evaluator: RoutingPolicyEvaluator,
     *,
@@ -689,6 +780,7 @@ def _build_ticket_result(
     generator: DraftGenerationProvider,
     skip_draft: bool = False,
     skip_draft_review: bool = False,
+    post_draft_verifier: GeminiPostDraftClaimVerifier | None = None,
     ticket_step_callback: Callable[[str], None] | None = None,
 ) -> tuple[dict[str, Any], str, CanonicalTicket]:
     """Compose one terminal outcome from its completed per-ticket pipeline phases."""
@@ -724,11 +816,96 @@ def _build_ticket_result(
         generator=generator,
         skip_draft=skip_draft,
         skip_draft_review=skip_draft_review,
+        precomputed_draft_attempt=prepared_ticket.precomputed_draft_attempt,
+        precomputed_claim_grounding=prepared_ticket.precomputed_claim_grounding,
+        post_draft_verifier=post_draft_verifier,
         issues=issues,
         duplicate_ticket_id=duplicate,
         progress_callback=ticket_step_callback,
     )
     return result, storage_ticket_id, ticket
+
+
+def _precompute_batched_post_draft_results(
+    *,
+    prepared_tickets: Sequence[_PreparedTicket],
+    settings: Settings,
+    generator: DraftGenerationProvider,
+    post_draft_verifier: GeminiPostDraftClaimVerifier,
+) -> None:
+    """Generate drafts for eligible tickets and verify all claims in batched Decisions calls."""
+    verified_ticket_indices: list[int] = []
+    batch_requests: list[tuple[list[dict[str, Any]], tuple[dict[str, Any], ...]]] = []
+
+    for idx, prepared_ticket in enumerate(prepared_tickets):
+        if prepared_ticket.issues or prepared_ticket.retrieval is None or prepared_ticket.decision is None:
+            continue
+        classification = prepared_ticket.classification
+        if classification is None or classification.provider_status != "classified":
+            continue
+        final_decision = (
+            prepared_ticket.policy_evaluation.get("final_decision")
+            if isinstance(prepared_ticket.policy_evaluation, dict)
+            else None
+        )
+        policy_route = (
+            final_decision.get("route")
+            if isinstance(final_decision, dict)
+            else prepared_ticket.decision.route
+        )
+        if policy_route != "draft_for_review":
+            continue
+        if prepared_ticket.pre_routing_safety is None:
+            prepared_ticket.pre_routing_safety = evaluate_pre_routing_safety(
+                prepared_ticket.ticket,
+                prepared_ticket.retrieval,
+            )
+        safety = prepared_ticket.pre_routing_safety
+        if (
+            safety.ticket_injection_detected
+            or safety.private_input_detected
+            or safety.private_source_count
+            or not safety.eligible_sources
+        ):
+            continue
+
+        operational_ticket = replace(prepared_ticket.ticket, context=safety.scrubbed_context)
+        raw_policy_eval = (
+            filter_evaluation_context(dict(prepared_ticket.policy_evaluation))
+            if isinstance(prepared_ticket.policy_evaluation, dict)
+            else None
+        )
+        sanitized_policy_eval = raw_policy_eval if isinstance(raw_policy_eval, dict) else None
+        try:
+            raw_draft = generator.generate_draft(
+                operational_ticket,
+                sources=safety.eligible_sources,
+                related_sources=safety.eligible_related_sources,
+                policy_evaluation=sanitized_policy_eval,
+                model_name=settings.llm_model,
+            )
+            duration = getattr(generator, "last_request_duration_seconds", 0.0)
+            if not isinstance(duration, (int, float)) or isinstance(duration, bool) or duration < 0:
+                duration = 0.0
+            draft_candidate = validate_generated_draft(raw_draft)
+            prepared_ticket.precomputed_draft_attempt = (raw_draft, float(duration), None)
+            all_safe_sources = (*safety.eligible_sources, *safety.eligible_related_sources)
+            verified_ticket_indices.append(idx)
+            batch_requests.append((draft_candidate["claims"], all_safe_sources))
+        except Exception as error:
+            duration = getattr(generator, "last_request_duration_seconds", 0.0)
+            if not isinstance(duration, (int, float)) or isinstance(duration, bool) or duration < 0:
+                duration = 0.0
+            prepared_ticket.precomputed_draft_attempt = (None, float(duration), error)
+
+    if not batch_requests:
+        return
+
+    verification_results = post_draft_verifier.verify_batch(batch_requests)
+    for ticket_idx, verification_result in zip(
+        verified_ticket_indices, verification_results, strict=True
+    ):
+        prepared_tickets[ticket_idx].precomputed_claim_grounding = verification_result
 
 
 def _retrieve_ticket_result(

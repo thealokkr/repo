@@ -648,6 +648,14 @@
                 "minimum": 0,
                 "maximum": 1
               },
+              "noul": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 1
+              },
               "reason": {
                 "type": "string",
                 "minLength": 1
@@ -1076,6 +1084,12 @@
             "string",
             "null"
           ]
+        },
+        "skip_draft": {
+          "type": "boolean"
+        },
+        "skip_draft_review": {
+          "type": "boolean"
         }
       }
     },
@@ -1328,93 +1342,126 @@
         }
       },
       "then": {
-        "properties": {
-          "draft": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "plain_text",
-              "claims",
-              "unsupported_points",
-              "conflicting_points",
-              "approval_required",
-              "send_status"
-            ],
-            "properties": {
-              "plain_text": {
-                "type": "string",
-                "minLength": 1
-              },
-              "claims": {
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "text",
-                    "source_ids",
-                    "citations"
-                  ],
-                  "properties": {
-                    "text": {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    "source_ids": {
-                      "type": "array",
-                      "minItems": 1,
-                      "items": {
-                        "type": "string"
-                      }
-                    },
-                    "citations": {
-                      "type": "array",
-                      "minItems": 1,
-                      "items": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": [
-                          "passage_id",
-                          "source_ref"
-                        ],
-                        "properties": {
-                          "passage_id": {
-                            "type": "string",
-                            "minLength": 1
-                          },
-                          "source_ref": {
-                            "type": "string",
-                            "minLength": 1
+        "if": {
+          "required": [
+            "generation"
+          ],
+          "properties": {
+            "generation": {
+              "required": [
+                "status",
+                "skip_draft"
+              ],
+              "properties": {
+                "status": {
+                  "const": "not_attempted"
+                },
+                "skip_draft": {
+                  "const": true
+                }
+              }
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "draft": {
+              "type": "null"
+            },
+            "handoff": {
+              "type": "null"
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "draft": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "plain_text",
+                "claims",
+                "unsupported_points",
+                "conflicting_points",
+                "approval_required",
+                "send_status"
+              ],
+              "properties": {
+                "plain_text": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "claims": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "text",
+                      "source_ids",
+                      "citations"
+                    ],
+                    "properties": {
+                      "text": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "source_ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "citations": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "passage_id",
+                            "source_ref"
+                          ],
+                          "properties": {
+                            "passage_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "source_ref": {
+                              "type": "string",
+                              "minLength": 1
+                            }
                           }
                         }
                       }
                     }
                   }
+                },
+                "unsupported_points": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "conflicting_points": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "approval_required": {
+                  "const": true
+                },
+                "send_status": {
+                  "const": "not_sent"
                 }
-              },
-              "unsupported_points": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              },
-              "conflicting_points": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              },
-              "approval_required": {
-                "const": true
-              },
-              "send_status": {
-                "const": "not_sent"
               }
+            },
+            "handoff": {
+              "type": "null"
             }
-          },
-          "handoff": {
-            "type": "null"
           }
         }
       }
@@ -1622,6 +1669,37 @@
                 "next_action": {
                   "type": "string",
                   "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        {
+          "required": [
+            "predicted_route",
+            "generation"
+          ],
+          "properties": {
+            "predicted_route": {
+              "const": "draft_for_review"
+            },
+            "draft": {
+              "type": "null"
+            },
+            "handoff": {
+              "type": "null"
+            },
+            "generation": {
+              "required": [
+                "status",
+                "skip_draft"
+              ],
+              "properties": {
+                "status": {
+                  "const": "not_attempted"
+                },
+                "skip_draft": {
+                  "const": true
                 }
               }
             }

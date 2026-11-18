@@ -10,7 +10,11 @@ import pytest
 
 from cloudserve_support.evaluation.run_metrics import evaluate_completed_run
 from cloudserve_support.reporting.terminal_summary import build_terminal_summary
-from cloudserve_support.reporting.output_schemas import EVALUATION_REPORT_SCHEMA
+from cloudserve_support.reporting.output_schemas import (
+    EVALUATION_REPORT_SCHEMA,
+    load_output_schemas,
+    validate_output_record,
+)
 from jsonschema import Draft202012Validator
 
 
@@ -150,9 +154,10 @@ def test_evaluate_completed_run_reports_reproducible_metrics_and_segments(
     assert technical["classification"]["precision_target_status"] == "pass"
     assert technical["classification"]["per_class"]["billing"]["precision_target_status"] == "met"
     assert technical["classification"]["confusion_matrix"]["billing"]["billing"] == 1
-    assert technical["urgency"]["precision_target"] == 0.70
-    assert technical["urgency"]["target_status"] == "pass"
-    assert technical["urgency"]["per_class"]["medium"]["precision_target_status"] == "met"
+    assert technical["urgency"]["precision_target"] is None
+    assert technical["urgency"]["target_status"] == "diagnostic"
+    assert technical["urgency"]["precision_classes_meeting_target"] is None
+    assert technical["urgency"]["per_class"]["medium"]["precision_target_status"] == "diagnostic"
     assert technical["urgency"]["confusion_matrix"]["medium"]["medium"] == 1
     assert technical["route_accuracy"]["value"] == 1
     assert technical["retrieval_hit_rate"]["value"] == 1
@@ -254,8 +259,12 @@ def test_classification_target_marks_zero_predictions_not_applicable_and_reports
     assert classification["per_class"]["account_access"]["precision_target_status"] == "not_applicable"
     assert classification["per_class"]["account_access"]["recall"]["value"] == 0
     urgency = technical["urgency"]
-    assert urgency["precision_target"] == 0.70
-    assert urgency["target_status"] == "below_target"
+    assert urgency["precision_target"] is None
+    assert urgency["target_status"] == "diagnostic"
+    assert urgency["precision_classes_meeting_target"] is None
+    assert urgency["per_class"]["high"]["precision_target_status"] == "not_applicable"
+    assert urgency["per_class"]["low"]["precision_target_status"] == "not_applicable"
+    assert urgency["per_class"]["medium"]["precision_target_status"] == "not_applicable"
     assert urgency["confusion_matrix"]["high"]["medium"] == 1
     assert urgency["confusion_matrix"]["low"]["medium"] == 1
     assert urgency["prioritization_error_counts"] == {
@@ -729,3 +738,100 @@ def test_per_class_metrics_count_partial_labels_and_preserve_verified_zero(
     assert zero_precision["denominator"] == 0
     assert zero_precision["missing_count"] == 0
     assert zero_precision["status"] == "not_applicable"
+
+
+def test_urgency_precision_is_reported_as_diagnostic_without_70_percent_gate(
+    tmp_path: Path,
+) -> None:
+    records = [
+        {
+            "ticket_id": "URG-1",
+            "labels": {
+                "intent": "billing",
+                "urgency": "medium",
+                "expected_route": "auto_respond",
+                "expected_doc_ids": ["DOC-1"],
+                "answerable_from_docs": True,
+                "must_not_auto_respond": False,
+            },
+        },
+        {
+            "ticket_id": "URG-2",
+            "labels": {
+                "intent": "billing",
+                "urgency": "low",
+                "expected_route": "auto_respond",
+                "expected_doc_ids": ["DOC-1"],
+                "answerable_from_docs": True,
+                "must_not_auto_respond": False,
+            },
+        },
+    ]
+    input_path = tmp_path / "urgency-diagnostic.json"
+    input_path.write_text(json.dumps(records), encoding="utf-8")
+    results = [
+        _result(input_index=0, ticket_id="URG-1"),
+        _result(input_index=1, ticket_id="URG-2"),
+    ]
+
+    report = evaluate_completed_run(
+        run_id="a" * 32,
+        results=results,
+        input_records=records,
+        input_path=input_path,
+        source_ref="data/tickets/development_tickets.json",
+        decision_events=[_decision(item) for item in results],
+    )
+
+    technical = report["run_observed"]["technical"]
+    assert technical["classification"]["precision_target"] == 0.85
+    assert technical["classification"]["precision_target_status"] == "pass"
+
+    urgency = technical["urgency"]
+    assert urgency["precision_target"] is None
+    assert urgency["target_status"] == "diagnostic"
+    assert urgency["precision_classes_meeting_target"] is None
+    assert urgency["exact_match_rate"]["value"] == 0.5
+    assert urgency["per_class"]["medium"]["precision"]["value"] == 0.5
+    assert urgency["per_class"]["medium"]["recall"]["value"] == 1.0
+    assert urgency["per_class"]["medium"]["precision_target_status"] == "diagnostic"
+    assert urgency["per_class"]["low"]["precision_target_status"] == "not_applicable"
+    assert urgency["confusion_matrix"] == {
+        "low": {"medium": 1},
+        "medium": {"medium": 1},
+    }
+    assert "Evaluation_Framework.docx" in urgency["precision_target_note"]
+    assert "Evaluation_Framework.docx" in urgency["note"]
+
+    Draft202012Validator(EVALUATION_REPORT_SCHEMA).validate(report)
+    schemas = load_output_schemas(Path("schemas/outputs"))
+    validate_output_record(
+        {
+            "run_id": "a" * 32,
+            "total_count": 2,
+            "completed_count": 2,
+            "failed_count": 0,
+            "exception_count": 0,
+            "route_counts": {"draft_for_review": 2, "escalate": 0, "degrade": 0},
+            "batch_export_duration_seconds": 0.01,
+            "evaluation": report,
+        },
+        schema_filename="metrics.schema.json",
+        schemas=schemas,
+    )
+
+    unlabeled_records = [{"ticket_id": "UNLABELED-1"}]
+    unlabeled_path = tmp_path / "unlabeled.json"
+    unlabeled_path.write_text(json.dumps(unlabeled_records), encoding="utf-8")
+    unlabeled_results = [_result(input_index=0, ticket_id="UNLABELED-1")]
+    unlabeled_report = evaluate_completed_run(
+        run_id="a" * 32,
+        results=unlabeled_results,
+        input_records=unlabeled_records,
+        input_path=unlabeled_path,
+        source_ref=str(unlabeled_path),
+        decision_events=[_decision(unlabeled_results[0])],
+    )
+    assert unlabeled_report["run_observed"]["technical"]["urgency"]["precision_target"] is None
+    assert unlabeled_report["run_observed"]["technical"]["urgency"]["target_status"] == "not_applicable"
+

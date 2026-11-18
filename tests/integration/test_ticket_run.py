@@ -989,8 +989,8 @@ def test_injection_private_context_and_operational_safety_escalate_before_genera
 ) -> None:
     def choose_labels(ticket: dict[str, Any]) -> tuple[str, str]:
         if ticket["subject"] == "It is not working":
-            return "deployment", "low"
-        return "data", "low"
+            return "deployment_failure", "low"
+        return "data_residency", "low"
 
     _install_decisions_api_mock(monkeypatch, choose_labels)
     retriever = _isolated_retriever(tmp_path)
@@ -1586,12 +1586,15 @@ def test_cli_skip_draft_and_draft_review_flags(
     skip_draft_stdout = capsys.readouterr().out
     skip_draft_dir = next(output_root.glob("skip-draft_*"))
     skipped = _read_jsonl(skip_draft_dir / "results.jsonl")[0]
-    assert skipped["predicted_route"] == "escalate"
+    assert skipped["predicted_route"] == "draft_for_review"
     assert skipped["reason"] == (
         "Draft generation skipped by --skip-draft; human review is required."
     )
     assert skipped["draft"] is None
+    assert skipped["handoff"] is None
     assert skipped["generation"]["status"] == "not_attempted"
+    assert skipped["generation"]["skip_draft"] is True
+    assert skipped["generation"]["skip_draft_review"] is False
     assert skipped["routing"]["matched_rule"] == "draft_generation_skipped"
     assert "Draft generation skipped by --skip-draft" in skip_draft_stdout
     assert "Post-draft checks: not run (no draft generated)" in skip_draft_stdout
@@ -1613,6 +1616,8 @@ def test_cli_skip_draft_and_draft_review_flags(
     assert unreviewed["predicted_route"] == "draft_for_review"
     assert unreviewed["draft"]["plain_text"]
     assert unreviewed["generation"]["status"] == "generated"
+    assert unreviewed["generation"]["skip_draft"] is False
+    assert unreviewed["generation"]["skip_draft_review"] is True
     review_checks = {
         check["check"]: check
         for check in unreviewed["guardrails"]["checks"]
@@ -1637,6 +1642,167 @@ def test_cli_skip_draft_and_draft_review_flags(
     )
     assert "Post-draft checks:" in skip_review_stdout
     assert "output_structure [skipped]" in skip_review_stdout
+
+
+def test_cli_skip_draft_and_skip_draft_review_combined_batch_and_schema_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Honor --skip-draft and --skip-draft-review together on a mixed batch and reject null normal drafts."""
+    from jsonschema import ValidationError
+    from cloudserve_support.reporting.output_schemas import (
+        load_output_schemas,
+        validate_output_record,
+    )
+
+    _install_local_kb_and_grounding_stubs(monkeypatch, tmp_path)
+    _install_decisions_api_mock(
+        monkeypatch,
+        lambda ticket: (
+            ("billing_query", "high")
+            if "refund" in str(ticket.get("subject", "")).casefold()
+            else ("api_key_issue", "low")
+        ),
+    )
+
+    class _NoCallDraftProvider:
+        name = "offline"
+
+        def generate_draft(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("Draft provider must not be called when --skip-draft is set.")
+
+    monkeypatch.setattr(
+        run_tickets_module,
+        "create_draft_generation_provider",
+        lambda _settings: _NoCallDraftProvider(),
+    )
+
+    input_path = tmp_path / "batch.json"
+    input_path.write_text(
+        json.dumps(
+            [
+                {
+                    "ticket_id": "T-OK",
+                    "channel": "email",
+                    "subject": "Rotate API keys",
+                    "body": "How do I rotate API keys in the dashboard?",
+                    "labels": {
+                        "intent": "api_key_issue",
+                        "urgency": "low",
+                        "expected_route": "draft_for_review",
+                        "answerable_from_docs": True,
+                        "must_not_auto_respond": False,
+                    },
+                },
+                {
+                    "ticket_id": "T-KPI",
+                    "channel": "email",
+                    "subject": "Rotate API keys again",
+                    "body": "How do I rotate API keys in the dashboard?",
+                    "labels": {
+                        "intent": "api_key_issue",
+                        "urgency": "high",
+                        "expected_route": "draft_for_review",
+                        "answerable_from_docs": True,
+                        "expected_doc_ids": ["DOC-API-001"],
+                        "must_not_auto_respond": False,
+                    },
+                },
+                {
+                    "ticket_id": "T-PROT",
+                    "channel": "email",
+                    "subject": "Refund request for invoice",
+                    "body": "Please refund our last enterprise invoice immediately.",
+                    "labels": {
+                        "intent": "billing_dispute",
+                        "urgency": "high",
+                        "expected_route": "escalate",
+                        "answerable_from_docs": False,
+                        "expected_doc_ids": [],
+                        "must_not_auto_respond": True,
+                    },
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_root = tmp_path / "outputs"
+    database_path = tmp_path / "runtime.sqlite3"
+    assert (
+        cli.main(
+            [
+                "run",
+                "--input",
+                str(input_path),
+                "--output-root",
+                str(output_root),
+                "--database",
+                str(database_path),
+                "--policy",
+                str(TEST_ROUTING_POLICY_PATH),
+                "--label",
+                "both-flags",
+                "--skip-draft",
+                "--skip-draft-review",
+            ]
+        )
+        == 0
+    )
+
+    run_dir = next(output_root.glob("both-flags_*"))
+    results = _read_jsonl(run_dir / "results.jsonl")
+    assert [row["ticket_id"] for row in results] == ["T-OK", "T-KPI", "T-PROT"]
+    for row in results[:2]:
+        assert row["predicted_route"] == "draft_for_review"
+        assert row["draft"] is None
+        assert row["handoff"] is None
+        assert row["generation"]["status"] == "not_attempted"
+        assert row["generation"]["skip_draft"] is True
+        assert row["generation"]["skip_draft_review"] is True
+        post_checks = {
+            check["check"]: check
+            for check in row["guardrails"]["checks"]
+            if check["check"]
+            in {
+                "output_structure",
+                "citation_grounding",
+                "private_data_output",
+                "instruction_integrity",
+            }
+        }
+        assert len(post_checks) == 4
+        assert all(check["action"] == "skipped" for check in post_checks.values())
+
+    assert results[2]["predicted_route"] == "escalate"
+    assert results[2]["handoff"] is not None
+
+    failure_report = json.loads((run_dir / "failure_report.json").read_text(encoding="utf-8"))
+    assert failure_report["run"]["skip_draft"] is True
+    assert failure_report["run"]["skip_draft_review"] is True
+    assert failure_report["run"]["drafts_for_review"] == 2
+    assert failure_report["run"]["escalated"] == 1
+    assert failure_report["run"]["operational_failure_count"] == 1
+    reported_by_id = {entry["ticket_id"]: entry for entry in failure_report["tickets"]}
+    assert set(reported_by_id) == {"T-KPI", "T-PROT"}
+    assert reported_by_id["T-KPI"]["final_route"] == "draft_for_review"
+    assert reported_by_id["T-PROT"]["final_route"] == "escalate"
+
+    failure_md = (run_dir / "failure_report.md").read_text(encoding="utf-8")
+    assert "| T-KPI |" in failure_md
+    assert "draft_for_review (completed)" in failure_md
+    assert "| T-PROT |" in failure_md
+    assert "escalate (completed)" in failure_md
+
+    # AC-3: normal run (skip_draft=False) with draft=None on draft_for_review must fail schema validation.
+    schemas = load_output_schemas()
+    invalid_record = json.loads(json.dumps(results[0]))
+    invalid_record["generation"]["skip_draft"] = False
+    with pytest.raises(ValidationError):
+        validate_output_record(
+            invalid_record,
+            schema_filename="result.schema.json",
+            schemas=schemas,
+        )
 
 
 def test_cli_labeled_run_uses_output_folder_name_as_run_id_and_preserves_history(

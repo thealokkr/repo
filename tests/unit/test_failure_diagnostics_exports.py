@@ -120,6 +120,8 @@ def _persist_ticket_outcome(
     classifier_fingerprint: str,
     settings: Settings,
     generator: Any,
+    skip_draft: bool = False,
+    skip_draft_review: bool = False,
 ) -> None:
     ticket = normalize_ticket_record(raw_ticket, input_index=input_index)
     policy_eval = evaluator.evaluate(
@@ -143,6 +145,8 @@ def _persist_ticket_outcome(
         generator=generator,
         issues=[],
         duplicate_ticket_id=False,
+        skip_draft=skip_draft,
+        skip_draft_review=skip_draft_review,
     )
     outcome["processing_duration_seconds"] = 0.05
     outcome["processing_latency_seconds"] = 0.05
@@ -1262,6 +1266,8 @@ def test_write_run_exports_builds_failure_report_json_strictly_from_sqlite_pre_d
         "escalated": 2,
         "degraded": 1,
         "blocked_by_guardrails": 2,
+        "skip_draft": False,
+        "skip_draft_review": False,
         "operational_failure_count": 3,
         "kpi_failed_record_count": 1,
         "reported_ticket_count": 4,
@@ -1612,7 +1618,7 @@ def test_write_run_exports_populates_after_drafting_diagnostics_and_cited_docs(
     policy = json.loads(TEST_ROUTING_POLICY_PATH.read_text(encoding="utf-8"))
     policy_fingerprint = fingerprint_policy_file(TEST_ROUTING_POLICY_PATH)
     classifier_fingerprint = fingerprint_classifier_model("gemini", "gemini-decision-1")
-    settings = Settings.from_env({"DRAFT_GENERATION_PROVIDER": "gemini"})
+    settings = Settings.from_env({"DRAFT_GENERATION_PROVIDER": "offline"})
 
     deploy_primary = _sample_kb_source(
         "DOC-DEPLOY-001",
@@ -2132,7 +2138,7 @@ def test_write_run_exports_renders_simplified_failure_report_markdown_ac1(
     policy = json.loads(TEST_ROUTING_POLICY_PATH.read_text(encoding="utf-8"))
     policy_fingerprint = fingerprint_policy_file(TEST_ROUTING_POLICY_PATH)
     classifier_fingerprint = fingerprint_classifier_model("gemini", "gemini-decision-1")
-    settings = Settings.from_env({"DRAFT_GENERATION_PROVIDER": "gemini"})
+    settings = Settings.from_env({"DRAFT_GENERATION_PROVIDER": "offline"})
 
     deploy_primary = _sample_kb_source(
         "DOC-DEPLOY-001",
@@ -2603,6 +2609,347 @@ def test_write_run_exports_renders_clean_zero_failure_markdown_and_sanitizes_tab
     assert len(table_lines) == 1
     assert "T-PIPE\\|BS\\\\\\|LINE" in table_lines[0]
     assert re.sub(r"\\.", "", table_lines[0]).count("|") == 5
+
+
+def test_failure_report_preserves_skip_draft_flags_and_dispositions(tmp_path: Path) -> None:
+    """failure_report exports expose skip flags and render --skip-draft draft_for_review dispositions."""
+    db_path = tmp_path / "runtime.sqlite3"
+    run_dir = tmp_path / "run_skip_flags"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    input_path = tmp_path / "tickets.json"
+    policy = json.loads(TEST_ROUTING_POLICY_PATH.read_text(encoding="utf-8"))
+    policy_fingerprint = fingerprint_policy_file(TEST_ROUTING_POLICY_PATH)
+    classifier_fingerprint = fingerprint_classifier_model("gemini", "gemini-decision-1")
+    settings = Settings.from_env({"DRAFT_GENERATION_PROVIDER": "offline"})
+    source = _sample_kb_source(
+        "DOC-API-001",
+        "DOC-API-001:p0",
+        "API key rotation",
+        "Rotate API keys from Settings -> API Keys.",
+    )
+    retrieval_hit = RetrievalResult(
+        status="ready",
+        reason_code="sources_ready",
+        reason="Matched API key article.",
+        sources=(source,),
+        eligible_candidate_count=1,
+        excluded_candidate_counts={},
+        minimum_similarity=MINIMUM_SIMILARITY,
+        embedding_model="gemini-embedding-001",
+        source_sha256="1" * 64,
+        metadata_manifest_sha256="2" * 64,
+    )
+    retrieval_miss = RetrievalResult(
+        status="skipped",
+        reason_code="protected_case",
+        reason="Protected escalation case.",
+        sources=(),
+        eligible_candidate_count=0,
+        excluded_candidate_counts={},
+        minimum_similarity=MINIMUM_SIMILARITY,
+        embedding_model="gemini-embedding-001",
+        source_sha256="1" * 64,
+        metadata_manifest_sha256="2" * 64,
+    )
+
+    evaluator = RoutingPolicyEvaluator(
+        policy,
+        claim_grounding_fn=lambda *, ticket, sources, related_sources: {
+            "claims": [{"text": "Rotate API keys from Settings -> API Keys.", "source_ids": [sources[0]["passage_id"]]}],
+            "unsupported_points": [],
+            "conflicting_points": [],
+            "confidence": 0.95,
+            "reason": "Supported by primary passage.",
+        },
+    )
+
+    raw_tickets = [
+        {
+            "ticket_id": "T-SKIP-OK",
+            "channel": "email",
+            "subject": "Rotate API keys",
+            "body": "How do I rotate my API keys?",
+            "labels": {
+                "intent": "api_key_issue",
+                "urgency": "low",
+                "expected_route": "draft_for_review",
+                "answerable_from_docs": True,
+                "expected_doc_ids": ["DOC-API-001"],
+                "must_not_auto_respond": False,
+            },
+        },
+        {
+            "ticket_id": "T-SKIP-KPI",
+            "channel": "email",
+            "subject": "Rotate API keys",
+            "body": "How do I rotate my API keys?",
+            "labels": {
+                "intent": "api_key_issue",
+                "urgency": "high",
+                "expected_route": "draft_for_review",
+                "answerable_from_docs": True,
+                "expected_doc_ids": ["DOC-API-001"],
+                "must_not_auto_respond": False,
+            },
+        },
+        {
+            "ticket_id": "T-SKIP-PROT",
+            "channel": "email",
+            "subject": "Billing refund",
+            "body": "Please issue a refund for our invoice.",
+            "labels": {
+                "intent": "billing_dispute",
+                "urgency": "high",
+                "expected_route": "escalate",
+                "answerable_from_docs": False,
+                "expected_doc_ids": [],
+                "must_not_auto_respond": True,
+            },
+        },
+    ]
+    input_path.write_text(json.dumps(raw_tickets), encoding="utf-8")
+
+    conn = connect_runtime_database(db_path)
+    try:
+        run_id = "run_skip_flags"
+        create_processing_run(
+            conn,
+            run_id=run_id,
+            input_ref=str(input_path),
+            started_at="2026-11-10T12:00:00Z",
+            label=None,
+            output_dir=str(run_dir),
+        )
+        for idx, raw_ticket in enumerate(raw_tickets):
+            is_prot = raw_ticket["ticket_id"] == "T-SKIP-PROT"
+            classification = TicketClassification(
+                intent="billing_dispute" if is_prot else "api_key_issue",
+                urgency="high" if is_prot else "low",
+                confidence=0.95,
+                provider="gemini",
+                model_name="gemini-decision-1",
+                provider_status="classified",
+            )
+            _persist_ticket_outcome(
+                conn,
+                run_id=run_id,
+                input_index=idx,
+                raw_ticket=raw_ticket,
+                classification=classification,
+                retrieval=retrieval_miss if is_prot else retrieval_hit,
+                evaluator=evaluator,
+                policy=policy,
+                policy_fingerprint=policy_fingerprint,
+                classifier_fingerprint=classifier_fingerprint,
+                settings=settings,
+                generator=OfflineDraftGenerationProvider(),
+                skip_draft=True,
+                skip_draft_review=True,
+            )
+        conn.commit()
+        write_run_exports(
+            conn,
+            run_id=run_id,
+            output_directory=run_dir,
+            input_records=raw_tickets,
+            input_path=input_path,
+            source_ref="external",
+        )
+    finally:
+        conn.close()
+
+    report = json.loads((run_dir / "failure_report.json").read_text(encoding="utf-8"))
+    assert report["run"]["skip_draft"] is True
+    assert report["run"]["skip_draft_review"] is True
+    assert report["run"]["drafts_for_review"] == 2
+    assert report["run"]["escalated"] == 1
+    assert report["run"]["operational_failure_count"] == 1
+    tickets_by_id = {t["ticket_id"]: t for t in report["tickets"]}
+    assert set(tickets_by_id) == {"T-SKIP-KPI", "T-SKIP-PROT"}
+    assert tickets_by_id["T-SKIP-KPI"]["final_route"] == "draft_for_review"
+    assert tickets_by_id["T-SKIP-PROT"]["final_route"] == "escalate"
+
+    report_md = (run_dir / "failure_report.md").read_text(encoding="utf-8")
+    assert "draft_for_review (completed)" in report_md
+    assert "escalate (completed)" in report_md
+
+
+def test_write_run_exports_renders_noul_failed_claims_without_clauses(
+    tmp_path: Path,
+) -> None:
+    """AC-1: Render failure_report.json and failure_report.md cleanly for Noul failed_claims."""
+    from cloudserve_support.guardrails.draft_safety import GeminiPostDraftClaimVerifier
+
+    class _StubNoulClient:
+        def __init__(self) -> None:
+            self.decisions = self
+
+        def create(self, **kwargs: Any) -> Any:
+            del kwargs
+            return type(
+                "Decision",
+                (),
+                {
+                    "model": "gemini-decision-1",
+                    "answers": {
+                        "claim_0_grounding": {"type": "noul", "noul": 0.50, "confidence": 0.50},
+                    },
+                },
+            )()
+
+    run_id = "9" * 32
+    policy = json.loads(TEST_ROUTING_POLICY_PATH.read_text(encoding="utf-8"))
+    policy_fingerprint = fingerprint_policy_file(TEST_ROUTING_POLICY_PATH)
+    classifier_fingerprint = fingerprint_classifier_model("gemini", "gemini-decision-1")
+    settings = Settings.from_env(
+        {"DRAFT_GENERATION_PROVIDER": "gemini", "GEMINI_API_KEY": "test-key"}
+    )
+    source = _sample_kb_source(
+        "DOC-API-001",
+        "DOC-API-001:p1",
+        "API Keys",
+        "Rotate API keys from the dashboard settings page.",
+    )
+    evaluator = RoutingPolicyEvaluator(
+        policy,
+        claim_grounding_fn=lambda *, ticket, sources, related_sources: {
+            "noul": 0.95,
+            "confidence": 0.95,
+            "reason": "Supported.",
+        },
+    )
+    retrieval = RetrievalResult(
+        status="ready",
+        reason_code="sources_ready",
+        reason="Approved primary source matched.",
+        sources=(source,),
+        eligible_candidate_count=1,
+        excluded_candidate_counts={},
+        minimum_similarity=MINIMUM_SIMILARITY,
+        embedding_model="gemini-embedding-001",
+        source_sha256="1" * 64,
+        metadata_manifest_sha256="2" * 64,
+    )
+    raw_ticket = {
+        "ticket_id": "T-NOUL-FAIL",
+        "channel": "email",
+        "subject": "API key rotation",
+        "body": "How do I rotate API keys?",
+    }
+    ticket = normalize_ticket_record(raw_ticket, input_index=0)
+    classification = TicketClassification(
+        intent="api_key_issue",
+        urgency="medium",
+        confidence=0.95,
+        provider="gemini",
+        model_name="gemini-decision-1",
+        provider_status="classified",
+    )
+    policy_eval = evaluator.evaluate(
+        ticket=ticket,
+        classification=classification.as_dict(),
+        retrieval=retrieval,
+    )
+    generator = _CustomDraftProvider(
+        claims=[
+            {
+                "text": "Rotate API keys from the dashboard settings page and receive a bonus credit.",
+                "source_ids": ["DOC-API-001:p1"],
+            }
+        ],
+        plain_text="Rotate API keys from the dashboard settings page and receive a bonus credit.",
+    )
+    verifier = GeminiPostDraftClaimVerifier(settings, client=_StubNoulClient())
+    outcome = build_ticket_outcome(
+        run_id=run_id,
+        input_index=0,
+        ticket=ticket,
+        classification=classification,
+        retrieval=retrieval,
+        decision=RoutingPolicyEvaluator.to_routing_decision(policy_eval),
+        policy_evaluation=policy_eval,
+        policy=policy,
+        policy_file_fingerprint=policy_fingerprint,
+        classifier_implementation_fingerprint=classifier_fingerprint,
+        settings=settings,
+        generator=generator,
+        issues=[],
+        duplicate_ticket_id=False,
+        post_draft_verifier=verifier,
+    )
+    outcome["processing_duration_seconds"] = 0.05
+    outcome["processing_latency_seconds"] = 0.05
+    assert outcome["route"] == "escalate"
+    assert outcome["post_draft_diagnostics"]["failed_claims"][0]["noul"] == 0.50
+    assert outcome["post_draft_diagnostics"]["failed_claims"][0]["failed_clauses"] == []
+
+    db_path = tmp_path / "runtime.sqlite3"
+    output_dir = tmp_path / "outputs" / run_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    input_path = tmp_path / "tickets.json"
+    input_path.write_text(json.dumps([raw_ticket]), encoding="utf-8")
+
+    connection = connect_runtime_database(db_path)
+    try:
+        create_processing_run(
+            connection,
+            run_id=run_id,
+            input_ref=str(input_path),
+            started_at="2026-11-10T12:00:00Z",
+            label=None,
+            output_dir=str(output_dir),
+        )
+        create_ticket_audit_records(
+            connection,
+            run_id=run_id,
+            storage_ticket_id=ticket.ticket_id,
+            channel=ticket.channel,
+            received_at=None,
+            customer_tier=None,
+            language_fluency=None,
+            context={},
+            processing_status=outcome["status"],
+            error_code=None,
+            error_message=None,
+            event_id="1" * 32,
+            occurred_at="2026-11-10T12:00:01Z",
+            event_type="ticket_completed",
+            input_summary=ticket.body,
+            action_taken=outcome["route"],
+            reason=outcome["reason"],
+            result_payload={
+                "input_index": 0,
+                "ticket_id": ticket.ticket_id,
+                "result": outcome,
+            },
+            guardrail_results=outcome["guardrails"],
+        )
+        connection.commit()
+        write_run_exports(
+            connection,
+            run_id=run_id,
+            output_directory=output_dir,
+            input_records=[raw_ticket],
+            input_path=input_path,
+            source_ref="external",
+        )
+    finally:
+        connection.close()
+
+    report = json.loads((output_dir / "failure_report.json").read_text(encoding="utf-8"))
+    after = report["tickets"][0]["after_drafting"]
+    assert after["failed_claims"][0]["noul"] == 0.50
+    assert after["failed_claims"][0]["failed_clauses"] == []
+    assert "Decisions Noul claim verification P(true)=0.50 failed" in after["failed_claims"][0]["failure_reason"]
+    assert "Decisions Noul verification" in after["distinct_from_pre_draft_claim_grounding_note"]
+    assert "clauses did not meet" not in after["distinct_from_pre_draft_claim_grounding_note"]
+
+    md = (output_dir / "failure_report.md").read_text(encoding="utf-8")
+    assert "citation_grounding (1 rejected claims)" in md
+    assert "1 rejected claim(s)" in md
+    assert "noul=0.50" in md
+    assert "Decisions Noul claim verification P(true)=0.50 failed" in md
+
 
 
 

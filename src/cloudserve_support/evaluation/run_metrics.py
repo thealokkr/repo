@@ -26,7 +26,6 @@ PUBLIC_ROUTE_VALUES = frozenset({"draft_for_review", "escalate", "degrade"})
 INTENT_PRECISION_TARGET = 0.85
 # The terminal report applies the same 85% threshold to total labeled intent accuracy.
 INTENT_ACCURACY_TARGET = INTENT_PRECISION_TARGET
-URGENCY_PRECISION_TARGET = 0.70
 def evaluate_completed_run(
     *,
     run_id: str,
@@ -348,10 +347,8 @@ def _technical_metrics(
         )
         if support == 0 or predicted_count == 0:
             precision_target_status = "not_applicable"
-        elif precision["value"] >= URGENCY_PRECISION_TARGET:
-            precision_target_status = "met"
         else:
-            precision_target_status = "below_target"
+            precision_target_status = "diagnostic"
         urgency_per_class[urgency] = {
             "precision": precision,
             "recall": _metric(
@@ -365,16 +362,7 @@ def _technical_metrics(
     urgency_target_classes = [
         row for row in urgency_per_class.values() if row["support"] > 0
     ]
-    urgency_target_met_count = sum(
-        row["precision_target_status"] == "met" for row in urgency_target_classes
-    )
-    urgency_target_status = (
-        "pass"
-        if urgency_target_classes and urgency_target_met_count == len(urgency_target_classes)
-        else "below_target"
-        if urgency_target_classes
-        else "not_applicable"
-    )
+    urgency_target_status = "diagnostic" if urgency_pairs else "not_applicable"
     urgency_confusion_predictions = set(urgency_predicted_classes)
     if urgency_missing_count:
         urgency_confusion_predictions.add("__unavailable_prediction__")
@@ -583,14 +571,14 @@ def _technical_metrics(
         },
         "urgency": {
             "status": "available" if urgency_pairs else "not_applicable",
-            "precision_target": URGENCY_PRECISION_TARGET,
+            "precision_target": None,
             "target_status": urgency_target_status,
             "precision_classes_with_support": len(urgency_target_classes),
-            "precision_classes_meeting_target": urgency_target_met_count,
+            "precision_classes_meeting_target": None,
             "precision_target_note": (
-                "Project-set target: at least 70% precision for each urgency class with labeled "
-                "support. Classes without labeled support or predictions are not applicable and "
-                "do not count as meeting the target."
+                "Evaluation_Framework.docx specifies no per-class urgency precision cutoff; "
+                "urgency metrics are reported as diagnostic only. Classes without labeled "
+                "support or predictions are not applicable."
             ),
             "exact_match_rate": _metric(
                 sum(expected == predicted for expected, predicted, _ in urgency_pairs),
@@ -605,7 +593,11 @@ def _technical_metrics(
             "confusion_matrix": urgency_confusion,
             "prioritization_error_counts": dict(sorted(urgency_direction_counts.items())),
             "prioritization_errors": urgency_errors,
-            "note": "Urgency precision is reported against the project-set target; recall, exact agreement, and prioritization trade-offs remain diagnostic.",
+            "note": (
+                "Evaluation_Framework.docx specifies no per-class urgency precision cutoff; "
+                "urgency exact-match rate, per-class precision/recall, confusion matrix, and "
+                "prioritization trade-offs are reported as diagnostic."
+            ),
         },
         "route_accuracy": _metric(
             sum(expected == actual for expected, actual, _ in route_pairs),

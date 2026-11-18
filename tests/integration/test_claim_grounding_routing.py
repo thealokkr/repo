@@ -1,4 +1,4 @@
-"""Integration and live verification for gemini-3.8-flash claim_grounding_check routing."""
+"""Integration and live verification for batched gemini-decision-1 Noul claim_grounding_check routing."""
 
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ import pytest
 
 from cloudserve_support.classification.ticket_classification import (
     DECISIONS_CLASSIFIER_MODEL,
+    DECISIONS_MAX_INPUT_BYTES,
+    DECISIONS_MAX_QUESTIONS,
     INTENT_VALUES,
     TicketClassification,
     TicketClassificationBatch,
@@ -49,7 +51,6 @@ from cloudserve_support.reporting.output_schemas import (
 from cloudserve_support.reporting.run_exports import write_run_exports
 from cloudserve_support.routing.policy_calibration import load_frozen_routing_policy
 from cloudserve_support.routing.routing_policy import (
-    CLAIM_GROUNDING_SYSTEM_INSTRUCTION,
     ClaimGroundingError,
     GeminiClaimGroundingChecker,
     POLICY_CHECK_NAMES,
@@ -267,28 +268,16 @@ def test_live_gemini_claim_grounding_routes_answerable_and_unsupported_tickets(
         retrieval=answerable_retrieval,
     )
     assert checker.call_count == 1
-    assert checker.last_model_name == "gemini-3.8-flash"
-    assert checker.last_model_name != DECISIONS_CLASSIFIER_MODEL
+    assert checker.last_model_name == DECISIONS_CLASSIFIER_MODEL
 
     answerable_grounding = answerable_eval["checks"][3]
-    allowed_answerable_ids = {
-        item["doc_id"]
-        for item in (*answerable_retrieval.sources, *answerable_retrieval.related_sources)
-    } | {
-        item["passage_id"]
-        for item in (*answerable_retrieval.sources, *answerable_retrieval.related_sources)
-    }
     assert answerable_grounding["name"] == "claim_grounding_check"
     assert answerable_grounding["status"] == "passed"
+    assert 0.5 < answerable_grounding["noul"] <= 1.0
     assert 0.0 <= answerable_grounding["confidence"] <= 1.0
-    assert len(answerable_grounding["claims"]) >= 1
-    for claim in answerable_grounding["claims"]:
-        assert claim["text"].strip()
-        assert set(claim["source_ids"]).issubset(allowed_answerable_ids)
-    assert answerable_grounding["unsupported_points"] == []
-    assert answerable_grounding["conflicting_points"] == []
     assert answerable_grounding["reason"].strip()
     assert answerable_eval["final_decision"]["route"] == "draft_for_review"
+    assert answerable_eval["final_decision"]["evidence_ready"] is True
     assert '"labels"' not in json.dumps(answerable_eval)
     assert '"history"' not in json.dumps(answerable_eval)
 
@@ -305,17 +294,14 @@ def test_live_gemini_claim_grounding_routes_answerable_and_unsupported_tickets(
         retrieval=unsupported_retrieval,
     )
     assert checker.call_count == 2
-    assert checker.last_model_name == "gemini-3.8-flash"
+    assert checker.last_model_name == DECISIONS_CLASSIFIER_MODEL
     assert unsupported_eval["checks"][2]["status"] == "passed"
     unsupported_grounding = unsupported_eval["checks"][3]
     assert unsupported_grounding["status"] == "failed"
     assert unsupported_grounding["matched_rule"] == "claim_grounding_failed"
-    assert (
-        not unsupported_grounding["claims"]
-        or len(unsupported_grounding["unsupported_points"]) >= 1
-        or len(unsupported_grounding["conflicting_points"]) >= 1
-    )
+    assert unsupported_grounding["noul"] <= 0.5
     assert unsupported_eval["final_decision"]["route"] == "escalate"
+    assert unsupported_eval["final_decision"]["evidence_ready"] is False
     assert unsupported_eval["final_decision"]["failed_check"] == "claim_grounding_check"
 
     recording_generator = _RecordingDraftGenerator()
@@ -366,11 +352,11 @@ def test_batch_fault_injection_degrades_safely_skips_short_circuited_and_persist
         },
     )
 
-    grounding_calls: list[tuple[str, dict[str, Any]]] = []
+    grounding_calls: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     draft_calls: list[str] = []
 
     class _FaultInjectingGeminiBoundary:
-        """Stub only external google.genai.Client to inject deterministic timeout and bad-JSON faults."""
+        """Stub only external google.genai.Client to handle batched Noul grounding and faults."""
 
         def __init__(self, **_: object) -> None:
             self.decisions = SimpleNamespace(create=self._create_decision)
@@ -380,10 +366,10 @@ def test_batch_fault_injection_degrades_safely_skips_short_circuited_and_persist
             )
 
         @staticmethod
-        def _create_decision(**_: object) -> SimpleNamespace:
-            return SimpleNamespace(
-                model=DECISIONS_CLASSIFIER_MODEL,
-                answers={
+        def _create_decision(*, model: str, input: str, questions: dict[str, Any], **_: object) -> SimpleNamespace:
+            if "ticket_0_intent" in questions:
+                ticket_count = len(json.loads(input)["tickets"])
+                all_answers = {
                     "ticket_0_intent": _make_decision_choice(
                         "ticket_0_intent", "configuration_help", 0.93, INTENT_VALUES
                     ),
@@ -403,11 +389,48 @@ def test_batch_fault_injection_degrades_safely_skips_short_circuited_and_persist
                         "ticket_2_urgency", "medium", 0.90, URGENCY_VALUES
                     ),
                     "ticket_3_intent": _make_decision_choice(
-                        "ticket_3_intent", "data", 0.94, INTENT_VALUES
+                        "ticket_3_intent", "data_residency", 0.94, INTENT_VALUES
                     ),
                     "ticket_3_urgency": _make_decision_choice(
                         "ticket_3_urgency", "medium", 0.85, URGENCY_VALUES
                     ),
+                }
+                return SimpleNamespace(
+                    model=DECISIONS_CLASSIFIER_MODEL,
+                    answers={
+                        key: all_answers[key]
+                        for idx in range(ticket_count)
+                        for key in (f"ticket_{idx}_intent", f"ticket_{idx}_urgency")
+                    },
+                )
+
+            if "claim_0_grounding" in questions:
+                return SimpleNamespace(
+                    model=DECISIONS_CLASSIFIER_MODEL,
+                    answers={
+                        q_name: SimpleNamespace(type="noul", noul=0.92, confidence=0.92)
+                        for q_name in questions
+                    },
+                )
+
+            payload = json.loads(input)
+            grounding_calls.append((model, payload, questions))
+            subjects = [item["subject"] for item in payload["tickets"]]
+            if "Simulate grounding timeout" in subjects:
+                raise TimeoutError("Gemini read timed out")
+            if "Simulate invalid grounding refusal" in subjects:
+                return SimpleNamespace(
+                    model=DECISIONS_CLASSIFIER_MODEL,
+                    answers={
+                        q_name: SimpleNamespace(type="refusal", reason="Blocked")
+                        for q_name in questions
+                    },
+                )
+            return SimpleNamespace(
+                model=DECISIONS_CLASSIFIER_MODEL,
+                answers={
+                    q_name: SimpleNamespace(type="noul", noul=0.92, confidence=0.92)
+                    for q_name in questions
                 },
             )
 
@@ -420,32 +443,9 @@ def test_batch_fault_injection_degrades_safely_skips_short_circuited_and_persist
 
         @staticmethod
         def _generate_content(*, model: str, contents: str, config: Any) -> SimpleNamespace:
+            del model, config
             payload = json.loads(contents)
             subject = payload["ticket"]["subject"]
-            if config.system_instruction == CLAIM_GROUNDING_SYSTEM_INSTRUCTION:
-                grounding_calls.append((model, payload))
-                if subject == "Simulate grounding timeout":
-                    raise TimeoutError("Gemini read timed out")
-                if subject == "Simulate invalid grounding JSON":
-                    return SimpleNamespace(text="{malformed-json")
-                primary_id = payload["primary_sources"][0]["passage_id"]
-                return SimpleNamespace(
-                    text=json.dumps(
-                        {
-                            "confidence": 0.96,
-                            "claims": [
-                                {
-                                    "text": "Store anything sensitive as a secret rather than a variable.",
-                                    "source_ids": [primary_id],
-                                }
-                            ],
-                            "unsupported_points": [],
-                            "conflicting_points": [],
-                            "reason": "Secrets storage and log masking are documented in DOC-DEPLOY-004.",
-                        }
-                    )
-                )
-
             draft_calls.append(subject)
             source = payload["primary_sources"][0]
             return SimpleNamespace(
@@ -474,20 +474,21 @@ def test_batch_fault_injection_degrades_safely_skips_short_circuited_and_persist
     monkeypatch.setenv("DRAFT_GENERATION_PROVIDER", "GEMINI")
 
     dev_0006 = _load_development_records()["DEV-0006"]
-    batch_records = [
+    # 1. AC-1: 3 surviving tickets sharing KB articles + 1 protected compliance_request ticket -> 1 grounding batch call.
+    shared_batch_records = [
         {
-            "ticket_id": "BATCH-TIMEOUT",
+            "ticket_id": "SURV-1",
             "channel": "email",
-            "subject": "Simulate grounding timeout",
+            "subject": "Secrets in environment variables",
             "body": "Where should secrets be stored so they do not appear in the logs?",
             "labels": {"expected_route": "draft_for_review"},
             "history": {"csat_rating": 4},
         },
         {
-            "ticket_id": "BATCH-BAD-JSON",
+            "ticket_id": "SURV-2",
             "channel": "chat",
-            "subject": "Simulate invalid grounding JSON",
-            "body": "Where should secrets be stored so they do not appear in the logs?",
+            "subject": "Masking sensitive config",
+            "body": "How do I keep API tokens masked in deployment logs?",
             "labels": {"expected_route": "draft_for_review"},
             "history": {"csat_rating": 4},
         },
@@ -495,14 +496,14 @@ def test_batch_fault_injection_degrades_safely_skips_short_circuited_and_persist
         {
             "ticket_id": "BATCH-PROTECTED",
             "channel": "email",
-            "subject": "Data storage location",
-            "body": "Where is our customer data stored and which region hosts it?",
-            "labels": {"expected_route": "auto_respond"},
+            "subject": "Retention period question",
+            "body": "Our policy requires two years of retention. What are our options?",
+            "labels": {"expected_route": "escalate"},
             "history": {"csat_rating": 5},
         },
     ]
     input_path = tmp_path / "batch_tickets.json"
-    input_path.write_text(json.dumps(batch_records), encoding="utf-8")
+    input_path.write_text(json.dumps(shared_batch_records), encoding="utf-8")
     database_path = tmp_path / "runtime.sqlite3"
     output_root = tmp_path / "outputs"
 
@@ -518,60 +519,43 @@ def test_batch_fault_injection_degrades_safely_skips_short_circuited_and_persist
             "--policy",
             str(FROZEN_POLICY_PATH),
             "--label",
-            "grounding-fault-batch",
+            "grounding-shared-batch",
         ]
     )
     assert exit_code == 0
 
-    # Protected ticket short-circuited before claim_grounding_check; only the 3 non-protected tickets called it.
-    assert [model for model, _ in grounding_calls] == ["gemini-3.8-flash"] * 3
-    assert [payload["ticket"]["subject"] for _, payload in grounding_calls] == [
-        "Simulate grounding timeout",
-        "Simulate invalid grounding JSON",
+    assert len(grounding_calls) == 1
+    g_model, g_payload, g_questions = grounding_calls[0]
+    assert g_model == DECISIONS_CLASSIFIER_MODEL
+    assert len(g_questions) == 3
+    assert len(g_questions) <= DECISIONS_MAX_QUESTIONS
+    assert len(json.dumps(g_payload).encode("utf-8")) <= DECISIONS_MAX_INPUT_BYTES
+    assert [t["subject"] for t in g_payload["tickets"]] == [
+        "Secrets in environment variables",
+        "Masking sensitive config",
         dev_0006["subject"],
     ]
-    for _, sent_payload in grounding_calls:
-        serialized_sent = json.dumps(sent_payload)
-        assert '"labels"' not in serialized_sent
-        assert '"history"' not in serialized_sent
-        assert len(sent_payload["primary_sources"]) >= 1
-        assert len(sent_payload["related_sources"]) >= 1
-    assert draft_calls == [dev_0006["subject"]]
+    serialized_sent = json.dumps(g_payload)
+    assert '"labels"' not in serialized_sent
+    assert '"history"' not in serialized_sent
+    assert isinstance(g_payload["articles"], dict)
+    assert len(g_payload["articles"]) >= 1
+    for ticket_item in g_payload["tickets"]:
+        assert set(ticket_item["candidate_doc_ids"]).issubset(g_payload["articles"])
+    assert len(draft_calls) == 3
 
     run_dirs = list(output_root.iterdir())
     assert len(run_dirs) == 1
-    results, decisions, metrics = _validate_all_exported_files(run_dirs[0])
+    results, _, metrics = _validate_all_exported_files(run_dirs[0])
     results_by_id = {row["ticket_id"]: row for row in results}
-
-    assert results_by_id["BATCH-TIMEOUT"]["status"] == "failed"
-    assert results_by_id["BATCH-TIMEOUT"]["draft"] is None
-    assert results_by_id["BATCH-TIMEOUT"]["error"]["code"] == "claim_grounding_timeout"
-    assert results_by_id["BATCH-TIMEOUT"]["routing"]["matched_rule"] == "claim_grounding_unavailable"
-
-    assert results_by_id["BATCH-BAD-JSON"]["status"] == "failed"
-    assert results_by_id["BATCH-BAD-JSON"]["draft"] is None
-    assert results_by_id["BATCH-BAD-JSON"]["error"]["code"] == "invalid_claim_grounding_output"
-    assert results_by_id["BATCH-BAD-JSON"]["routing"]["matched_rule"] == "claim_grounding_unavailable"
-
-    assert results_by_id["DEV-0006"]["status"] == "completed"
+    assert results_by_id["SURV-1"]["predicted_route"] == "draft_for_review"
+    assert results_by_id["SURV-2"]["predicted_route"] == "draft_for_review"
     assert results_by_id["DEV-0006"]["predicted_route"] == "draft_for_review"
-    assert results_by_id["DEV-0006"]["draft"] is not None
-
-    assert results_by_id["BATCH-PROTECTED"]["status"] == "completed"
     assert results_by_id["BATCH-PROTECTED"]["predicted_route"] == "escalate"
-    assert results_by_id["BATCH-PROTECTED"]["draft"] is None
-    assert (
-        results_by_id["BATCH-PROTECTED"]["routing"]["matched_rule"]
-        == "operational_protected_data_location"
-    )
-    assert metrics["total_count"] == 4
-    assert metrics["route_counts"] == {
-        "draft_for_review": 1,
-        "escalate": 1,
-        "degrade": 2,
-    }
+    assert results_by_id["BATCH-PROTECTED"]["routing"]["matched_rule"] == "operational_protected_compliance"
+    assert metrics["route_counts"] == {"draft_for_review": 3, "escalate": 1, "degrade": 0}
 
-    # AC-3: Inspect SQLite audit_events routing stage rows and re-verify write_run_exports directly.
+    # Inspect SQLite audit_events routing stage rows and re-verify write_run_exports directly.
     connection = connect_runtime_database(database_path)
     try:
         run_id = results[0]["run_id"]
@@ -591,12 +575,9 @@ def test_batch_fault_injection_degrades_safely_skips_short_circuited_and_persist
             assert '"history"' not in row["event_payload_json"]
             routing_by_ticket[row["ticket_id"]] = (row["model_name"], value)
 
-        assert routing_by_ticket["BATCH-TIMEOUT"][0] == "gemini-3.8-flash"
-        assert routing_by_ticket["BATCH-TIMEOUT"][1]["final_decision"]["route"] == "degrade"
-        assert routing_by_ticket["BATCH-BAD-JSON"][0] == "gemini-3.8-flash"
-        assert routing_by_ticket["BATCH-BAD-JSON"][1]["final_decision"]["route"] == "degrade"
-        assert routing_by_ticket["DEV-0006"][0] == "gemini-3.8-flash"
-        assert routing_by_ticket["DEV-0006"][1]["final_decision"]["route"] == "draft_for_review"
+        for tid in ("SURV-1", "SURV-2", "DEV-0006"):
+            assert routing_by_ticket[tid][0] == DECISIONS_CLASSIFIER_MODEL
+            assert routing_by_ticket[tid][1]["final_decision"]["route"] == "draft_for_review"
         assert routing_by_ticket["BATCH-PROTECTED"][0] is None
         assert routing_by_ticket["BATCH-PROTECTED"][1]["checks"][3]["status"] == "skipped"
         assert routing_by_ticket["BATCH-PROTECTED"][1]["final_decision"]["route"] == "escalate"
@@ -607,7 +588,7 @@ def test_batch_fault_injection_degrades_safely_skips_short_circuited_and_persist
             connection,
             run_id=run_id,
             output_directory=re_export_dir,
-            input_records=batch_records,
+            input_records=shared_batch_records,
             input_path=input_path,
             source_ref="batch_tickets.json",
         )
@@ -615,6 +596,67 @@ def test_batch_fault_injection_degrades_safely_skips_short_circuited_and_persist
         _validate_all_exported_files(re_export_dir)
     finally:
         connection.close()
+
+    # 2. AC-3: Timeout and refusal degrade safely without crashing.
+    grounding_calls.clear()
+    timeout_input = tmp_path / "timeout_batch.json"
+    timeout_input.write_text(
+        json.dumps([
+            {
+                "ticket_id": "BATCH-TIMEOUT",
+                "channel": "email",
+                "subject": "Simulate grounding timeout",
+                "body": "Where should secrets be stored so they do not appear in the logs?",
+            }
+        ]),
+        encoding="utf-8",
+    )
+    _, timeout_dir, _ = run_ticket_batch(
+        input_path=timeout_input,
+        output_root=tmp_path / "timeout_outputs",
+        database_path=tmp_path / "timeout.sqlite3",
+        policy_path=FROZEN_POLICY_PATH,
+    )
+    timeout_results, _, _ = _validate_all_exported_files(timeout_dir)
+    assert timeout_results[0]["status"] == "failed"
+    assert timeout_results[0]["error"]["code"] == "claim_grounding_timeout"
+    assert timeout_results[0]["routing"]["matched_rule"] == "claim_grounding_unavailable"
+
+    refusal_input = tmp_path / "refusal_batch.json"
+    refusal_input.write_text(
+        json.dumps([
+            {
+                "ticket_id": "BATCH-REFUSAL",
+                "channel": "chat",
+                "subject": "Simulate invalid grounding refusal",
+                "body": "Where should secrets be stored so they do not appear in the logs?",
+            }
+        ]),
+        encoding="utf-8",
+    )
+    _, refusal_dir, _ = run_ticket_batch(
+        input_path=refusal_input,
+        output_root=tmp_path / "refusal_outputs",
+        database_path=tmp_path / "refusal.sqlite3",
+        policy_path=FROZEN_POLICY_PATH,
+    )
+    refusal_results, _, _ = _validate_all_exported_files(refusal_dir)
+    assert refusal_results[0]["status"] == "failed"
+    assert refusal_results[0]["error"]["code"] == "invalid_claim_grounding_output"
+    assert refusal_results[0]["routing"]["matched_rule"] == "claim_grounding_unavailable"
+
+    # 3. AC-3: DRAFT_GENERATION_PROVIDER=OFFLINE makes 0 grounding decisions.create calls.
+    grounding_calls.clear()
+    monkeypatch.setenv("DRAFT_GENERATION_PROVIDER", "OFFLINE")
+    _, offline_dir, _ = run_ticket_batch(
+        input_path=timeout_input,
+        output_root=tmp_path / "offline_outputs",
+        database_path=tmp_path / "offline.sqlite3",
+        policy_path=FROZEN_POLICY_PATH,
+    )
+    assert len(grounding_calls) == 0
+    _validate_all_exported_files(offline_dir)
+    monkeypatch.setenv("DRAFT_GENERATION_PROVIDER", "GEMINI")
 
     # Dedicated short-circuit batch: protected + low-confidence + no-source makes zero grounding calls.
     grounding_calls.clear()
@@ -712,22 +754,7 @@ def test_claim_grounding_fails_closed_on_missing_key_decision_model_conflict_and
     retrieval = retriever.retrieve(ticket)
     frozen_policy = load_frozen_routing_policy(FROZEN_POLICY_PATH)
 
-    # 1. Misconfiguring GEMINI_LLM_MODEL to gemini-decision-1 is rejected before any client call.
-    bad_model_settings = Settings(
-        gemini_api_key="test-key",
-        llm_model=DECISIONS_CLASSIFIER_MODEL,
-    )
-    with pytest.raises(ClaimGroundingError) as exc_info:
-        check_claim_grounding(
-            ticket=ticket,
-            sources=retrieval.sources,
-            related_sources=retrieval.related_sources,
-            settings=bad_model_settings,
-            today=FIXED_TODAY,
-        )
-    assert exc_info.value.code == "claim_grounding_configuration_error"
-
-    # 2. Missing API key in GEMINI mode fails closed to degrade in run_ticket_batch without genai stubs.
+    # 1. Missing API key in GEMINI mode fails closed to degrade in run_ticket_batch without genai stubs.
     monkeypatch.setenv("GEMINI_API_KEY", "")
     monkeypatch.setenv("GOOGLE_API_KEY", "")
     monkeypatch.setenv("DRAFT_GENERATION_PROVIDER", "GEMINI")
@@ -861,3 +888,178 @@ def test_claim_grounding_fails_closed_on_missing_key_decision_model_conflict_and
     assert unknown_outcome["status"] == "failed"
     assert unknown_outcome["draft"] is None
     assert unknown_outcome["error"]["code"] == "invalid_claim_grounding_output"
+
+
+@pytest.mark.parametrize("failing_noul", [0.50, 0.12])
+def test_batched_noul_grounding_noul_boundary_unclear_and_sqlite_comparison(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_noul: float,
+) -> None:
+    """AC-2: Verify noul > 0.5 vs <= 0.5 fail-closed, unclear_request evidence_ready=False, and SQLite comparison."""
+    isolated_index, vectors_by_doc = _copy_isolated_index(tmp_path, "ac2_index")
+    deploy_vector = vectors_by_doc["DOC-DEPLOY-004"]
+    monkeypatch.setattr(
+        "cloudserve_support.knowledge.retrieval.KnowledgeRetriever.__init__.__kwdefaults__",
+        {
+            "source_path": DEFAULT_SOURCE_PATH,
+            "metadata_path": DEFAULT_METADATA_PATH,
+            "index_path": isolated_index,
+            "embedding_client": None,
+            "collection": None,
+            "today": FIXED_TODAY,
+        },
+    )
+
+    class _NoulBoundaryClient:
+        def __init__(self, **_: object) -> None:
+            self.decisions = SimpleNamespace(create=self._create_decision)
+            self.models = SimpleNamespace(
+                embed_content=self._embed_content,
+                generate_content=self._generate_content,
+            )
+
+        @staticmethod
+        def _create_decision(*, questions: dict[str, Any], **_: object) -> SimpleNamespace:
+            if "ticket_0_intent" in questions:
+                return SimpleNamespace(
+                    model=DECISIONS_CLASSIFIER_MODEL,
+                    answers={
+                        "ticket_0_intent": _make_decision_choice(
+                            "ticket_0_intent", "configuration_help", 0.94, INTENT_VALUES
+                        ),
+                        "ticket_0_urgency": _make_decision_choice(
+                            "ticket_0_urgency", "medium", 0.85, URGENCY_VALUES
+                        ),
+                        "ticket_1_intent": _make_decision_choice(
+                            "ticket_1_intent", "configuration_help", 0.93, INTENT_VALUES
+                        ),
+                        "ticket_1_urgency": _make_decision_choice(
+                            "ticket_1_urgency", "medium", 0.85, URGENCY_VALUES
+                        ),
+                        "ticket_2_intent": _make_decision_choice(
+                            "ticket_2_intent", "unclear_request", 0.91, INTENT_VALUES
+                        ),
+                        "ticket_2_urgency": _make_decision_choice(
+                            "ticket_2_urgency", "low", 0.80, URGENCY_VALUES
+                        ),
+                    },
+                )
+            if "claim_0_grounding" in questions:
+                return SimpleNamespace(
+                    model=DECISIONS_CLASSIFIER_MODEL,
+                    answers={
+                        q_name: SimpleNamespace(type="noul", noul=0.92, confidence=0.92)
+                        for q_name in questions
+                    },
+                )
+            # Ticket A (index 0) -> 0.88 (passes), Ticket B (index 1) -> failing_noul (0.50 or 0.12)
+            return SimpleNamespace(
+                model=DECISIONS_CLASSIFIER_MODEL,
+                answers={
+                    "ticket_0_grounding": SimpleNamespace(type="noul", noul=0.88, confidence=0.88),
+                    "ticket_1_grounding": SimpleNamespace(
+                        type="noul",
+                        noul=failing_noul,
+                        confidence=max(failing_noul, 1.0 - failing_noul),
+                    ),
+                },
+            )
+
+        @staticmethod
+        def _embed_content(*, contents: object, **_: object) -> SimpleNamespace:
+            batch = [contents] if isinstance(contents, str) else list(contents)
+            return SimpleNamespace(
+                embeddings=[SimpleNamespace(values=deploy_vector) for _ in batch]
+            )
+
+        @staticmethod
+        def _generate_content(*, contents: str, **_: object) -> SimpleNamespace:
+            payload = json.loads(contents)
+            source = payload["primary_sources"][0]
+            return SimpleNamespace(
+                text=json.dumps(
+                    {
+                        "plain_text": (
+                            "Thank you for getting in touch. Store anything sensitive "
+                            "as a secret rather than a variable so values stay masked in logs."
+                        ),
+                        "claims": [
+                            {
+                                "text": "Store anything sensitive as a secret rather than a variable.",
+                                "source_ids": [source["passage_id"]],
+                            }
+                        ],
+                        "unsupported_points": [],
+                        "conflicting_points": [],
+                    }
+                )
+            )
+
+    monkeypatch.setattr(genai, "Client", _NoulBoundaryClient)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("GOOGLE_API_KEY", "")
+    monkeypatch.setenv("GEMINI_LLM_MODEL", "gemini-3.8-flash")
+    monkeypatch.setenv("DRAFT_GENERATION_PROVIDER", "GEMINI")
+
+    records = [
+        {
+            "ticket_id": "TICKET-A",
+            "channel": "email",
+            "subject": "Secrets in environment variables",
+            "body": "Where should secrets be stored so they do not appear in logs?",
+        },
+        {
+            "ticket_id": "TICKET-B",
+            "channel": "chat",
+            "subject": "Unsupported custom integration",
+            "body": "Can CloudServe sync directly with our custom mainframe?",
+        },
+        {
+            "ticket_id": "TICKET-C",
+            "channel": "email",
+            "subject": "Help",
+            "body": "Something is wrong, please assist.",
+        },
+    ]
+    input_path = tmp_path / "ac2_tickets.json"
+    input_path.write_text(json.dumps(records), encoding="utf-8")
+    database_path = tmp_path / "ac2_runtime.sqlite3"
+    output_root = tmp_path / "ac2_outputs"
+
+    run_id, out_dir, _ = run_ticket_batch(
+        input_path=input_path,
+        output_root=output_root,
+        database_path=database_path,
+        policy_path=FROZEN_POLICY_PATH,
+    )
+    results, _, _ = _validate_all_exported_files(out_dir)
+    by_id = {row["ticket_id"]: row for row in results}
+
+    assert by_id["TICKET-A"]["predicted_route"] == "draft_for_review"
+    assert by_id["TICKET-A"]["routing"]["final_decision"]["evidence_ready"] is True
+
+    assert by_id["TICKET-B"]["predicted_route"] == "escalate"
+    assert by_id["TICKET-B"]["routing"]["matched_rule"] == "claim_grounding_failed"
+    assert by_id["TICKET-B"]["routing"]["final_decision"]["evidence_ready"] is False
+
+    assert by_id["TICKET-C"]["predicted_route"] == "escalate"
+    assert by_id["TICKET-C"]["routing"]["final_decision"]["evidence_ready"] is False
+
+    connection = connect_runtime_database(database_path)
+    try:
+        rows = connection.execute(
+            "SELECT ticket_id, generated_labels_json FROM ticket_label_comparison "
+            "WHERE run_id = ? ORDER BY ticket_id",
+            (run_id,),
+        ).fetchall()
+        labels_by_id = {
+            row["ticket_id"]: json.loads(row["generated_labels_json"])
+            for row in rows
+        }
+        assert labels_by_id["TICKET-A"]["answerable_from_docs"] is True
+        assert labels_by_id["TICKET-B"]["answerable_from_docs"] is False
+        assert labels_by_id["TICKET-C"]["answerable_from_docs"] is False
+    finally:
+        connection.close()
+

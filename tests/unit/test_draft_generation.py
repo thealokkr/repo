@@ -661,32 +661,6 @@ def test_ticket_outcomes_gates_drafting_and_passes_verified_claims_and_approved_
     for missing_policy_eval in (
         None,
         {"checks": []},
-        {
-            "checks": [],
-            "final_decision": {
-                "route": "draft_for_review",
-                "matched_rule": "all_routing_policy_checks_passed",
-                "protected_case": False,
-                "reason": "Missing passed claim_grounding_check.",
-            },
-        },
-        {
-            "checks": [
-                {
-                    "name": "claim_grounding_check",
-                    "status": "passed",
-                    "claims": [],
-                    "unsupported_points": [],
-                    "conflicting_points": [],
-                }
-            ],
-            "final_decision": {
-                "route": "draft_for_review",
-                "matched_rule": "all_routing_policy_checks_passed",
-                "protected_case": False,
-                "reason": "Empty claims.",
-            },
-        },
     ):
         missing_recorder = RecordingGenerator()
         missing_outcome = build_ticket_outcome(
@@ -716,6 +690,71 @@ def test_ticket_outcomes_gates_drafting_and_passes_verified_claims_and_approved_
         assert missing_outcome["status"] == "failed"
         assert missing_outcome["generation"]["status"] == "not_attempted"
         assert missing_outcome["draft"] is None
+
+    for claims_free_policy_eval in (
+        {
+            "checks": [
+                {
+                    "name": "claim_grounding_check",
+                    "status": "passed",
+                    "confidence": 0.94,
+                    "reason": "Supported.",
+                }
+            ],
+            "final_decision": {
+                "route": "draft_for_review",
+                "matched_rule": "all_routing_policy_checks_passed",
+                "protected_case": False,
+                "reason": "Supported.",
+            },
+        },
+        {
+            "checks": [
+                {
+                    "name": "claim_grounding_check",
+                    "status": "passed",
+                    "claims": [],
+                    "unsupported_points": [],
+                    "conflicting_points": [],
+                }
+            ],
+            "final_decision": {
+                "route": "draft_for_review",
+                "matched_rule": "all_routing_policy_checks_passed",
+                "protected_case": False,
+                "reason": "Empty claims.",
+            },
+        },
+    ):
+        claims_free_recorder = RecordingGenerator()
+        claims_free_outcome = build_ticket_outcome(
+            run_id="4" * 32,
+            input_index=3,
+            ticket=ticket,
+            classification=classification,
+            retrieval=retrieval,
+            decision=RoutingDecision(
+                route="draft_for_review",
+                matched_rule="all_routing_policy_checks_passed",
+                protected_case=False,
+                evidence_ready=True,
+                reason="Supported.",
+            ),
+            policy_evaluation=claims_free_policy_eval,
+            policy=policy,
+            policy_file_fingerprint=policy_fp,
+            classifier_implementation_fingerprint=classifier_fp,
+            settings=Settings(draft_generation_provider="OFFLINE"),
+            generator=claims_free_recorder,
+            issues=[],
+            duplicate_ticket_id=False,
+        )
+        assert len(claims_free_recorder.invocations) == 1
+        assert "verified_claims" not in claims_free_recorder.invocations[0]["request_payload"]
+        assert claims_free_outcome["route"] == "draft_for_review"
+        assert claims_free_outcome["generation"]["status"] == "generated"
+        assert claims_free_outcome["draft"] is not None
+        Draft202012Validator(DRAFT_SCHEMA).validate(claims_free_outcome["draft"])
 
 
 def test_generator_prompt_enforces_closed_world_articles_and_must_not_claim_rules() -> None:
@@ -967,52 +1006,158 @@ def test_gemini_provider_boundaries_and_outcome_degradation(monkeypatch: pytest.
         )
     assert bad_model_exc.value.code == "generation_configuration_error"
 
-    refund_source = _source("DOC-1:hash:0", "Refunds are issued within five days.")
+    refund_source = _source("DOC-1:hash:0", "Refunds are issued within five business days after approval.")
     offline_provider = OfflineDraftGenerationProvider()
-    for unverified_policy in (
-        None,
-        {"checks": [], "final_decision": {"route": "draft_for_review"}},
-        {
-            "checks": [
-                {
-                    "name": "claim_grounding_check",
-                    "status": "passed",
-                    "claims": [],
-                    "unsupported_points": [],
-                    "conflicting_points": [],
-                }
-            ],
-            "final_decision": {"route": "draft_for_review"},
-        },
-        {
-            "checks": [
-                {
-                    "name": "claim_grounding_check",
-                    "status": "passed",
-                    "claims": [{"text": "Out of scope.", "source_ids": ["DOC-OTHER"]}],
-                    "unsupported_points": [],
-                    "conflicting_points": [],
-                }
-            ],
-            "final_decision": {"route": "draft_for_review"},
-        },
+    with pytest.raises(DraftGenerationError) as offline_empty_exc:
+        offline_provider.generate_draft(_ticket(), sources=())
+    assert offline_empty_exc.value.code == "generation_no_sources"
+
+    claims_free_policy = {
+        "checks": [
+            {
+                "name": "claim_grounding_check",
+                "status": "passed",
+                "confidence": 0.94,
+                "reason": "Supported.",
+            }
+        ],
+        "final_decision": {"route": "draft_for_review"},
+    }
+    validator = Draft202012Validator(DRAFT_SCHEMA)
+    for policy_eval in (None, claims_free_policy):
+        offline_draft = offline_provider.generate_draft(
+            _ticket(),
+            sources=(refund_source,),
+            policy_evaluation=policy_eval,
+        )
+        validator.validate(offline_draft)
+        assert offline_draft["claims"][0]["source_ids"] == ["DOC-1:hash:0"]
+        assert offline_draft["claims"][0]["text"] == "Refunds are issued within five business days after approval."
+
+    captured_calls: dict[str, Any] = {}
+
+    class ClaimsFreeModels:
+        @staticmethod
+        def generate_content(*, model: str, contents: str, config: object) -> object:
+            del config
+            captured_calls["model"] = model
+            captured_calls["contents"] = contents
+            return SimpleNamespace(
+                text=json.dumps(
+                    {
+                        "plain_text": "Refunds are issued within five business days after approval.",
+                        "claims": [
+                            {
+                                "text": "Refunds are issued within five business days after approval.",
+                                "source_ids": ["DOC-1"],
+                            }
+                        ],
+                        "unsupported_points": [],
+                        "conflicting_points": [],
+                    }
+                )
+            )
+
+    class ClaimsFreeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+            self.models = ClaimsFreeModels()
+
+    monkeypatch.setattr(genai, "Client", ClaimsFreeClient)
+    claims_free_gemini = GeminiDraftGenerationProvider(_settings())
+    gemini_draft = claims_free_gemini.generate_draft(
+        _ticket(),
+        sources=(refund_source,),
+        related_sources=(_source("DOC-2:hash:0", "See billing policy for details."),),
+        policy_evaluation=claims_free_policy,
+        model_name="gemini-3.8-flash",
+    )
+    validator.validate(gemini_draft)
+    sent_payload = json.loads(captured_calls["contents"])
+    assert set(sent_payload) == {"ticket", "primary_sources", "related_sources"}
+    assert "labels" not in captured_calls["contents"]
+    assert "history" not in captured_calls["contents"]
+    assert [row["doc_id"] for row in sent_payload["primary_sources"]] == ["DOC-1"]
+    assert [row["doc_id"] for row in sent_payload["related_sources"]] == ["DOC-2"]
+
+    for prohibited_text in (
+        "We have already reset your password and issued a refund.",
+        "Your account has already been updated.",
+        "Your account was updated.",
     ):
-        with pytest.raises(DraftGenerationError) as offline_unverified_exc:
+        prohibited_source = _source("DOC-PROHIBITED:hash:0", prohibited_text)
+        with pytest.raises(DraftGenerationError) as prohibited_exc:
             offline_provider.generate_draft(
                 _ticket(),
-                sources=(refund_source,),
-                policy_evaluation=unverified_policy,
+                sources=(prohibited_source,),
+                policy_evaluation=claims_free_policy,
             )
-        assert offline_unverified_exc.value.code == "generation_no_verified_claims"
+        assert prohibited_exc.value.code == "generation_no_supported_claims"
 
-        with pytest.raises(DraftGenerationError) as gemini_unverified_exc:
-            provider.generate_draft(
-                _ticket(),
-                sources=(refund_source,),
-                policy_evaluation=unverified_policy,
-                model_name="gemini-3.8-flash",
-            )
-        assert gemini_unverified_exc.value.code == "generation_no_verified_claims"
+        snapshots, source_sha256, manifest_sha256 = _load_real_kb_snapshots()
+        prohibited_snapshot = {
+            **snapshots["DOC-ACCT-001"],
+            "passage_text": prohibited_text,
+        }
+        prohibited_outcome = build_ticket_outcome(
+            run_id="9" * 32,
+            input_index=0,
+            ticket=_ticket(),
+            classification=TicketClassification(
+                intent="account_access",
+                urgency="medium",
+                confidence=0.95,
+                provider="gemini",
+                model_name=DECISIONS_CLASSIFIER_MODEL,
+                provider_status="classified",
+            ),
+            retrieval=RetrievalResult(
+                status="ready",
+                reason_code="relevant_sources_found",
+                reason="Retrieved documentation.",
+                sources=(prohibited_snapshot,),
+                related_sources=(),
+                eligible_candidate_count=1,
+                excluded_candidate_counts={},
+                minimum_similarity=MINIMUM_SIMILARITY,
+                embedding_model="gemini-embedding-001",
+                source_sha256=source_sha256,
+                metadata_manifest_sha256=manifest_sha256,
+            ),
+            decision=RoutingDecision(
+                route="draft_for_review",
+                matched_rule="all_routing_policy_checks_passed",
+                protected_case=False,
+                evidence_ready=True,
+                reason="Supported.",
+            ),
+            policy_evaluation={
+                "checks": [
+                    {
+                        "name": "claim_grounding_check",
+                        "status": "passed",
+                        "confidence": 0.94,
+                        "reason": "Supported.",
+                    }
+                ],
+                "final_decision": {
+                    "route": "draft_for_review",
+                    "matched_rule": "all_routing_policy_checks_passed",
+                    "protected_case": False,
+                    "reason": "Supported.",
+                },
+            },
+            policy=load_frozen_routing_policy(DEFAULT_ROUTING_POLICY_CONFIG_PATH),
+            policy_file_fingerprint=fingerprint_policy_file(DEFAULT_ROUTING_POLICY_CONFIG_PATH),
+            classifier_implementation_fingerprint=fingerprint_classifier_implementation(),
+            settings=Settings(draft_generation_provider="OFFLINE"),
+            generator=offline_provider,
+            issues=[],
+            duplicate_ticket_id=False,
+        )
+        assert prohibited_outcome["route"] == "degrade"
+        assert prohibited_outcome["draft"] is None
+        assert prohibited_outcome["generation"]["error_code"] == "generation_no_supported_claims"
 
     class TimeoutModels:
         @staticmethod
