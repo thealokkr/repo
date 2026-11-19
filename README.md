@@ -26,6 +26,12 @@ See [AGENTS.md](AGENTS.md) for repository conventions, data handling rules, and 
 
 The diagram source is [docs/architecture.dot](docs/architecture.dot).
 
+### Pipeline data flow
+
+![CloudServe Support Automation pipeline data flow](docs/data-flow.svg)
+
+The diagram source is [docs/data-flow.dot](docs/data-flow.dot) (also exported as [docs/data-flow.png](docs/data-flow.png)).
+
 ## Python and Chroma setup
 
 The project uses Python 3.13 and `uv`. The Chroma dependency is declared in `pyproject.toml` and pinned by `uv.lock`.
