@@ -79,7 +79,7 @@ Usage: setup.sh [OPTIONS]
 Configure the local CloudServe Support Automation repository checkout: install uv
 and Python 3.13 if missing, create .env from .env.example, prompt for
 GEMINI_API_KEY (optional), sync Python/Chroma dependencies, activate .venv, and
-print the validation CLI command.
+print CLI commands.
 
 Options:
       --reinit-db        Re-initialize SQLite DB, output schemas, and Chroma vector store
@@ -298,7 +298,10 @@ conn.close()
     echo "  cd \"$_repo_root\" && source .venv/bin/activate"
     echo ""
   fi
-  echo "Run the CLI against the validation set:"
+  echo "Run the CLI (see available commands):"
+  echo "  uv run cloudserve --help"
+  echo ""
+  echo "Example: process the validation ticket set:"
   echo "  uv run cloudserve run --input data/tickets/validation_tickets.json --skip-draft --skip-draft-review"
   echo ""
   echo "(Or with .venv activated, simply run:)"
