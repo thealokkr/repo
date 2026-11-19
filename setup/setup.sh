@@ -76,14 +76,12 @@ _cloudserve_usage() {
   cat <<'EOF'
 Usage: setup.sh [OPTIONS]
 
-Download/configure the CloudServe Support Automation repository, install uv and
-Python 3.13, create .env from .env.example, prompt for GEMINI_API_KEY (optional),
-sync Python/Chroma dependencies, activate .venv, and print the validation CLI command.
+Configure the local CloudServe Support Automation repository checkout: install uv
+and Python 3.13 if missing, create .env from .env.example, prompt for
+GEMINI_API_KEY (optional), sync Python/Chroma dependencies, activate .venv, and
+print the validation CLI command.
 
 Options:
-  -d, --dir <path>       Target directory when cloning (default: ./repo)
-  -b, --branch <name>    Git branch to clone (default: repo default branch)
-      --repo-url <url>   GitHub repository URL (default: https://github.com/thealokkr/repo.git)
       --reinit-db        Re-initialize SQLite DB, output schemas, and Chroma vector store
       --non-interactive  Skip the interactive GEMINI_API_KEY prompt
   -h, --help             Show this help message
@@ -94,29 +92,11 @@ EOF
 }
 
 _cloudserve_setup_main() {
-  _repo_url="${CLOUDSERVE_REPO_URL:-https://github.com/thealokkr/repo.git}"
-  _target_dir="${CLOUDSERVE_DIR:-repo}"
-  _branch="${CLOUDSERVE_BRANCH:-}"
   _reinit_db=0
   _non_interactive="${CLOUDSERVE_NONINTERACTIVE:-0}"
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      -d|--dir)
-        [ "$#" -ge 2 ] || { echo "Error: $1 requires a directory argument." >&2; return 1; }
-        _target_dir="$2"
-        shift 2
-        ;;
-      -b|--branch)
-        [ "$#" -ge 2 ] || { echo "Error: $1 requires a branch argument." >&2; return 1; }
-        _branch="$2"
-        shift 2
-        ;;
-      --repo-url)
-        [ "$#" -ge 2 ] || { echo "Error: $1 requires a URL argument." >&2; return 1; }
-        _repo_url="$2"
-        shift 2
-        ;;
       --reinit-db)
         _reinit_db=1
         shift
@@ -138,7 +118,7 @@ _cloudserve_setup_main() {
 
   echo "==> CloudServe Support Automation environment setup"
 
-  # 1. Locate existing checkout or clone from GitHub
+  # 1. Locate repository root (must be run from an existing checkout)
   _script_dir="$(_cloudserve_script_dir)"
   _parent_dir="$(cd "$_script_dir/.." 2>/dev/null && pwd)"
   _repo_root=""
@@ -150,33 +130,9 @@ _cloudserve_setup_main() {
     _repo_root="$_parent_dir"
     echo "==> Using existing repository checkout: $_repo_root"
   else
-    if ! command -v git >/dev/null 2>&1; then
-      echo "Error: git is required to clone the repository. Please install git and retry." >&2
-      return 1
-    fi
-
-    if [ -d "$_target_dir/.git" ] && _cloudserve_is_repo_root "$_target_dir"; then
-      _repo_root="$(cd "$_target_dir" && pwd)"
-      echo "==> Found existing repository at $_repo_root"
-    elif [ -e "$_target_dir" ]; then
-      echo "Error: Target path '$_target_dir' already exists and is not a CloudServe repo checkout." >&2
-      echo "Pass --dir <new-path> to clone into a different directory." >&2
-      return 1
-    else
-      echo "==> Cloning repository from $_repo_url into $_target_dir..."
-      if [ -n "$_branch" ]; then
-        git clone --branch "$_branch" "$_repo_url" "$_target_dir" || return 1
-      else
-        git clone "$_repo_url" "$_target_dir" || return 1
-      fi
-      _repo_root="$(cd "$_target_dir" && pwd)"
-      if [ -z "$_branch" ] && [ -f "$_repo_root/.env.example" ] && ! grep -q "GEMINI_API_KEY" "$_repo_root/.env.example"; then
-        if git -C "$_repo_root" rev-parse --verify origin/feature/gemini-provider-migration >/dev/null 2>&1; then
-          echo "==> Switching to branch feature/gemini-provider-migration..."
-          git -C "$_repo_root" checkout feature/gemini-provider-migration || return 1
-        fi
-      fi
-    fi
+    echo "Error: Could not locate the CloudServe repository root (pyproject.toml and src/cloudserve_support)." >&2
+    echo "Run setup/setup.sh from inside your cloned repository checkout." >&2
+    return 1
   fi
 
   cd "$_repo_root" || return 1
