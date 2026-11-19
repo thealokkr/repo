@@ -206,6 +206,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.print_help()
         return 0
 
+    env_path = REPOSITORY_ROOT / ".env"
+    try:
+        Settings.from_env().require_gemini_api_key()
+    except CloudServeError as error:
+        location_hint = (
+            f" Copy .env.example to {env_path} and add GEMINI_API_KEY or GOOGLE_API_KEY."
+            if not env_path.is_file()
+            else f" Set GEMINI_API_KEY or GOOGLE_API_KEY in {env_path}."
+        )
+        print(f"cloudserve: error: {error.message}{location_hint}", file=sys.stderr)
+        return 1
+
     progress_printer = _RunProgressPrinter()
     try:
         _run_id, output_directory, _metrics = run_ticket_batch(

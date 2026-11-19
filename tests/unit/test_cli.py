@@ -8,7 +8,40 @@ from pathlib import Path
 from cloudserve_support import cli
 
 
+def test_run_fails_immediately_when_gemini_key_is_missing_from_env(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    called = False
+
+    def fail_if_called(**kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("run_ticket_batch should not be called without a Gemini key")
+
+    monkeypatch.setattr(cli, "REPOSITORY_ROOT", tmp_path)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.setattr(cli, "run_ticket_batch", fail_if_called)
+
+    assert cli.main(["run", "--input", "data/tickets/validation_tickets.json"]) == 1
+    assert called is False
+    stderr = capsys.readouterr().err
+    assert "GEMINI_API_KEY or GOOGLE_API_KEY is required" in stderr
+    assert ".env" in stderr
+
+    (tmp_path / ".env").write_text("GEMINI_API_KEY=\nGOOGLE_API_KEY=\n", encoding="utf-8")
+    assert cli.main(["run", "--input", "data/tickets/validation_tickets.json"]) == 1
+    assert called is False
+    stderr = capsys.readouterr().err
+    assert "GEMINI_API_KEY or GOOGLE_API_KEY is required" in stderr
+    assert ".env" in stderr
+
+
 def test_run_startup_failure_returns_exit_status_one(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
     def fail_before_processing(**kwargs):
         del kwargs
         raise OSError("input path is unavailable")
@@ -24,6 +57,7 @@ def test_run_prints_stage_progress_output_folder_and_metrics_table(
     monkeypatch,
     capsys,
 ) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     output_directory = tmp_path / "run-123"
     output_directory.mkdir()
     metrics_content = (

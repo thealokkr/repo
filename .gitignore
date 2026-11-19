@@ -26,3 +26,5 @@ outputs/*
 .agents/
 
 prd-revisions/
+
+AGENTS.md
