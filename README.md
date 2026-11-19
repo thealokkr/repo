@@ -31,7 +31,7 @@ Both the Chroma vector store (`data/index/chroma/`) and SQLite runtime database 
 
 ### Automated setup (macOS / Linux)
 
-Run inside a cloned checkout (or standalone to clone `https://github.com/thealokkr/repo.git` automatically):
+Run inside the repository checkout:
 
 ```bash
 source setup/setup.sh
@@ -40,7 +40,7 @@ source setup/setup.sh
 (Or execute `bash setup/setup.sh` and activate `.venv` afterwards.)
 
 `setup/setup.sh` checks each prerequisite before installing:
-1. Uses the current checkout (or clones the repository if run outside one).
+1. Locates and uses the existing repository checkout.
 2. Installs `uv` and Python `3.13.13` only if not already installed.
 3. Copies `.env.example` to `.env` (if missing) and prompts for `GEMINI_API_KEY` (leaving it blank still completes setup cleanly).
 4. Syncs `.venv` with `uv sync --frozen`, activates `.venv`, and verifies the checked-in Chroma vector store and SQLite DB.
